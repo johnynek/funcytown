@@ -190,21 +190,40 @@ object HashNode {
       old + tupE
     }
   }
-  def empty[K,V] : HashNode[K,V] = new HashNode(Node.empty[List[(Long,K,V)]])
+  def empty[K,V] : HashNode[K,V] = new HashNode(Block.BITMASK, Node.empty[List[(Long,K,V)]])
 }
 
-class HashNode[K,+V](node : Node[List[(Long,K,V)]]) extends Map[K,V] {
+class HashNode[K,+V](bitmask : Long, node : Node[List[(Long,K,V)]]) extends Map[K,V] {
+
+  def rehash(newbitmask : Long) : HashNode[K,V] = {
+    if ( newbitmask == bitmask ) {
+      this
+    }
+    else {
+      val base = new HashNode[K,V](newbitmask, Node.empty[List[(Long,K,V)]])
+      foldLeft(base) { (old, kv) => old + kv }
+    }
+  }
+
+  protected def longHash(k : K) = (k.hashCode.toLong & bitmask)
+
   override def +[V1 >: V](kv : (K,V1)) : HashNode[K,V1] = {
     val castNode = node.asInstanceOf[Node[List[(Long,K,V1)]]]
-    val entryTup = (kv._1.hashCode.toLong, kv._1, kv._2)
+    val entryTup = (longHash(kv._1), kv._1, kv._2)
     val newNode = castNode.map(entryTup._1) { x =>
-      Some(entryTup :: x.getOrElse(Nil))
+      Some(entryTup :: (x.getOrElse(Nil).filter { _._2 != kv._1 }))
     }._2
-    new HashNode[K,V1](newNode)
+    val nht = new HashNode[K,V1](bitmask,  newNode)
+    if (newNode.size * 2 > bitmask) {
+      nht.rehash((bitmask << 1) | 1L)
+    }
+    else {
+      nht
+    }
   }
 
   override def -(key : K) : HashNode[K,V] = {
-    val hashKey = key.hashCode.toLong
+    val hashKey = longHash(key)
     val newNode = node.map(hashKey) { stored =>
       stored.flatMap { items =>
         val list = items.filter { el =>
@@ -218,11 +237,17 @@ class HashNode[K,+V](node : Node[List[(Long,K,V)]]) extends Map[K,V] {
         }
       }
     }._2
-    new HashNode[K,V](newNode)
+    val nht = new HashNode[K,V](bitmask, newNode)
+    if (newNode.size / 4 < bitmask) {
+      nht.rehash((bitmask >> 1) | Block.BITMASK)
+    }
+    else {
+      nht
+    }
   }
 
   override def get(key : K) : Option[V] = {
-    val hashKey = key.hashCode.toLong
+    val hashKey = longHash(key)
     node.get(hashKey).flatMap { list =>
       list.find { item => item._2 == key }
         .map { _._3 }
