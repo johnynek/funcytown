@@ -12,6 +12,8 @@ resolvers += "Concurrent Maven Repo" at "http://conjars.org/repo"
 
 libraryDependencies += "org.scala-tools.testing" % "specs_2.8.1" % "1.6.6" % "test"
 
+libraryDependencies += "com.twitter" % "kryo" % "2.04"
+
 parallelExecution in Test := false
 
 seq(assemblySettings: _*)
