@@ -9,11 +9,11 @@ object HashNode {
     }
   }
   def empty[K,V](implicit mem : Allocator[List[(Long,K,V)],_]) : HashNode[K,V] = {
-    new HashNode(Block.BITMASK, mem.empty(0), mem)
+    new HashNode(0, Block.BITMASK, mem.empty(0), mem)
   }
 }
 
-class HashNode[K,+V](bitmask : Long, node : Node[List[(Long,K,V)],_],
+class HashNode[K,+V](val longSize : Long, bitmask : Long, node : Node[List[(Long,K,V)],_],
   mem : Allocator[List[(Long,K,V)],_]) extends Map[K,V] {
 
   def rehash[V1 >: V](newbitmask : Long, newMem : Allocator[List[(Long,K,V1)],_]) : HashNode[K,V1] = {
@@ -21,7 +21,7 @@ class HashNode[K,+V](bitmask : Long, node : Node[List[(Long,K,V)],_],
       this
     }
     else {
-      val base = new HashNode[K,V1](newbitmask, newMem.empty(0), newMem)
+      val base = new HashNode[K,V1](0L, newbitmask, newMem.empty(0), newMem)
       foldLeft(base) { (old, kv) => old + kv }
     }
   }
@@ -33,10 +33,19 @@ class HashNode[K,+V](bitmask : Long, node : Node[List[(Long,K,V)],_],
     val castNode = node.asInstanceOf[Node[List[(Long,K,V1)],_]]
     val castMem = mem.asInstanceOf[Allocator[List[(Long,K,V1)],_]]
     val entryTup = (longHash(kv._1), kv._1, kv._2)
-    val newNode = castNode.map(entryTup._1) { x =>
+    val oldValNewNode = castNode.map(entryTup._1) { x =>
       Some(entryTup :: (x.getOrElse(Nil).filter { _._2 != kv._1 }))
-    }._2
-    val nht = new HashNode[K,V1](bitmask, newNode, castMem)
+    }
+    // Let's compute the new size:
+    val newSize = if (oldValNewNode._1.flatMap { _.find { el => el._2 == kv._1 } }.isDefined) {
+        // The key was present
+        longSize
+      }
+      else {
+        longSize + 1L
+      }
+    val newNode = oldValNewNode._2
+    val nht = new HashNode[K,V1](newSize, bitmask, newNode, castMem)
     if (newNode.size * 2 > bitmask) {
       // TODO maybe we should ask the allocator for the next allocator here
       nht.rehash((bitmask << 1) | 1L, castMem)
@@ -48,7 +57,7 @@ class HashNode[K,+V](bitmask : Long, node : Node[List[(Long,K,V)],_],
 
   override def -(key : K) : HashNode[K,V] = {
     val hashKey = longHash(key)
-    val newNode = node.map(hashKey) { stored =>
+    val oldValNewNode = node.map(hashKey) { stored =>
       stored.flatMap { items =>
         val list = items.filter { el =>
           (el._2 != key)
@@ -60,8 +69,17 @@ class HashNode[K,+V](bitmask : Long, node : Node[List[(Long,K,V)],_],
           Some(list)
         }
       }
-    }._2
-    val nht = new HashNode[K,V](bitmask, newNode, mem)
+    }
+    // Let's compute the new size:
+    val newSize = if (oldValNewNode._1.flatMap { _.find { el => el._2 == key } }.isDefined) {
+        // The key was present
+        longSize - 1
+      }
+      else {
+        longSize
+      }
+    val newNode = oldValNewNode._2
+    val nht = new HashNode[K,V](newSize, bitmask, newNode, mem)
     if (newNode.size / 4 < bitmask) {
       nht.rehash((bitmask >> 1) | Block.BITMASK, mem)
     }
@@ -82,5 +100,14 @@ class HashNode[K,+V](bitmask : Long, node : Node[List[(Long,K,V)],_],
     node.toStream.flatMap { list =>
       list.map { tup => (tup._2, tup._3) }
     }.iterator
+  }
+
+  override def size : Int = {
+    if (longSize <= Int.MaxValue) {
+      longSize.toInt
+    }
+    else {
+      error("Actual size: " + longSize + " too large to fit in Int")
+    }
   }
 }
