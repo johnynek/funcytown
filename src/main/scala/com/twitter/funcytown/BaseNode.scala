@@ -6,7 +6,7 @@ object Allocator extends LowPriorityAllocator {
   // TODO add disk allocators
 }
 
-trait Allocator[T, PtrT] {
+trait Allocator[T, @specialized(Long) PtrT] {
   val nullPtr : PtrT
   def deref(ptr : PtrT) : Node[T,PtrT]
   def ptrOf(node : Node[T,PtrT]) : PtrT
@@ -37,8 +37,9 @@ class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
   mem : Allocator[T,PtrT])(implicit mf : Manifest[PtrT]) extends Node[T,PtrT] {
   override def findLeaf(pos : Long) : Option[Leaf[T,PtrT]] = {
     val (thisIdx, nextPos) = Block.toBlockIdx(height, pos)
-    val nextNode = mem.deref(ptrs(thisIdx))
-    if (null != nextNode) {
+    val nextPtr = ptrs(thisIdx)
+    if (mem.nullPtr != nextPtr) {
+      val nextNode = mem.deref(nextPtr)
       nextNode.findLeaf(nextPos)
     }
     else {
