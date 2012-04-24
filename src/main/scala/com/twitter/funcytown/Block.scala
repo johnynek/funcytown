@@ -33,8 +33,7 @@ object Block {
   }
 }
 
-sealed class Block[@specialized(Int,Long) N](bitmask : Int, ary : Array[N])
-  (implicit mf : Manifest[N]) {
+sealed class Block[@specialized(Int,Long) N](bitmask : Int, ary : Array[N]) {
 
   private def toIdx(in : Long) = (in & bitmask).toInt
   def apply(idx : Long) : N = ary(toIdx(idx))

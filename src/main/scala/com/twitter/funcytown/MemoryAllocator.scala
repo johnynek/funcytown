@@ -11,6 +11,9 @@ trait LowPriorityAllocator {
 class MemoryAllocator[T](implicit mf : Manifest[Node[T,_]]) extends Allocator[T, Node[T,_]] {
   override val nullPtr : Node[T,_] = null
   override def deref(ptr : Node[T,_]) = ptr.asInstanceOf[Node[T,Node[T,_]]]
+  override def empty(height : Short) : PtrNode[T,Node[T,_]] = {
+    allocPtrNode(0L, height, Block.alloc[Node[T,_]])
+  }
   override def ptrOf(node : Node[T,Node[T,_]]) = node
   override def allocLeaf(height : Short, pos : Long, value : T) = {
     new Leaf(height, pos, value, this)

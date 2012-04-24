@@ -10,9 +10,7 @@ trait Allocator[T, PtrT] {
   val nullPtr : PtrT
   def deref(ptr : PtrT) : Node[T,PtrT]
   def ptrOf(node : Node[T,PtrT]) : PtrT
-  def empty(height : Short)(implicit mf : Manifest[PtrT]) : PtrNode[T,PtrT] = {
-    allocPtrNode(0L, height, Block.alloc[PtrT])
-  }
+  def empty(height : Short): PtrNode[T,PtrT]
   def allocLeaf(height : Short, pos : Long, value : T) : Leaf[T,PtrT]
   def allocPtrNode(sz : Long, height : Short, ptrs : Block[PtrT]) : PtrNode[T,PtrT]
 }
