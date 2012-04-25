@@ -34,6 +34,14 @@ class ScalaListSerializer[T] extends KSerializer[List[T]] {
   }
 }
 
+class SingletonSerializer[T](inst : T) extends KSerializer[T] {
+  override def write(k : Kryo, out : KOutput, obj : T) {
+    assert(inst == obj, "Singleton serializer only works for one instance")
+    // Do nothing
+  }
+  override def create(k : Kryo, in : KInput, stype : Class[T]) : T = inst
+}
+
 class DiskAllocator[T](filename : String)(implicit mf : Manifest[T]) extends Allocator[T, Long] {
 
   val kryo = new Kryo
@@ -41,6 +49,10 @@ class DiskAllocator[T](filename : String)(implicit mf : Manifest[T]) extends All
   kryo.setRegistrationRequired(false)
   kryo.addDefaultSerializer(classOf[List[AnyRef]], new ScalaListSerializer[AnyRef])
   kryo.register(mf.erasure)
+  // Put in some singletons:
+  kryo.register(this.getClass, new SingletonSerializer(this))
+  kryo.register(None.getClass, new SingletonSerializer(None))
+  kryo.register(Nil.getClass, new SingletonSerializer(Nil))
 
   kryo.setInstantiatorStrategy(new StdInstantiatorStrategy());
 
