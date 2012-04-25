@@ -11,10 +11,11 @@ import org.objenesis.strategy.StdInstantiatorStrategy;
 
 import scala.annotation.tailrec
 import scala.collection.mutable.{HashMap => MHash}
+import scala.collection.immutable.LinearSeq
 
 object DiskAllocator {
-  def newHash[K,V](filename : String, tups : (K,V)*)(implicit mf : Manifest[List[(Long,K,V)]]) = {
-    HashNode.apply(tups : _*)(new DiskAllocator[List[(Long,K,V)]](filename))
+  def newHash[K,V](filename : String, tups : (K,V)*) = {
+    HashNode.apply(tups : _*)(new DiskAllocator(filename))
   }
 }
 
@@ -42,13 +43,12 @@ class SingletonSerializer[T](inst : T) extends KSerializer[T] {
   override def create(k : Kryo, in : KInput, stype : Class[T]) : T = inst
 }
 
-class DiskAllocator[T](filename : String)(implicit mf : Manifest[T]) extends Allocator[T, Long] {
+class DiskAllocator(filename : String) extends Allocator[Long] {
 
   val kryo = new Kryo
   // Accept everything for now:
   kryo.setRegistrationRequired(false)
   kryo.addDefaultSerializer(classOf[List[AnyRef]], new ScalaListSerializer[AnyRef])
-  kryo.register(mf.erasure)
   // Put in some singletons:
   kryo.register(this.getClass, new SingletonSerializer(this))
   kryo.register(None.getClass, new SingletonSerializer(None))
@@ -61,7 +61,7 @@ class DiskAllocator[T](filename : String)(implicit mf : Manifest[T]) extends All
   // We have to init to avoid writing something in the "null" offset of 0:
   file.writeInt(0x5ca1ab1e)
   private val output = new KOutput(4096, 1 << 20)
-  private val emptyPtrNodes = MHash[Short, DiskPtrNode[T]]()
+  private val emptyPtrNodes = MHash[Short, DiskPtrNode[_]]()
 
   val LEAFNODE = 1 : Byte
   val PTRNODE = 2 : Byte
@@ -82,13 +82,14 @@ class DiskAllocator[T](filename : String)(implicit mf : Manifest[T]) extends All
       (objType, buf)
     }
     objType match {
-      case LEAFNODE => readLeaf(ptr, buf)
-      case PTRNODE => readPtrNode(ptr, buf)
+      // This is ugly, but this method is not type safe anyway
+      case LEAFNODE => readLeaf[AnyRef](ptr, buf)
+      case PTRNODE => readPtrNode[AnyRef](ptr, buf)
       case _ => error("Unrecognized node type: " + objType)
     }
   }
 
-  protected def readLeaf(ptr : Long, buf : Array[Byte]) : DiskLeaf[T] = {
+  protected def readLeaf[T](ptr : Long, buf : Array[Byte]) : DiskLeaf[T] = {
     val input = new KInput(buf)
     // These bool parameters mean optimize for positive sizes:
     val height = input.readShort(true)
@@ -97,7 +98,7 @@ class DiskAllocator[T](filename : String)(implicit mf : Manifest[T]) extends All
     new DiskLeaf[T](ptr, height, pos, obj, this)
   }
 
-  protected def readPtrNode(ptr : Long, buf : Array[Byte]) : DiskPtrNode[T] = {
+  protected def readPtrNode[T](ptr : Long, buf : Array[Byte]) : DiskPtrNode[T] = {
     val input = new KInput(buf)
     // These bool parameters mean optimize for positive sizes:
     val treeSize = input.readLong(true)
@@ -114,21 +115,26 @@ class DiskAllocator[T](filename : String)(implicit mf : Manifest[T]) extends All
     new DiskPtrNode[T](ptr, treeSize, height, blk, this)
   }
 
-  override def empty(height : Short) : PtrNode[T,Long] = {
+  override def empty[T](height : Short) : PtrNode[T,Long] = {
     emptyPtrNodes.synchronized {
       emptyPtrNodes.getOrElseUpdate(height,
         allocPtrNode(0L, height, Block.alloc[Long])
       )
+      .asInstanceOf[PtrNode[T,Long]]
     }
   }
 
-  override def ptrOf(node : Node[T,Long]) = {
+  override def ptrOf[T](node : Node[T,Long]) = {
     node match {
       case leaf : DiskLeaf[_] => leaf.ptr
       case ptrNode : DiskPtrNode[_] => ptrNode.ptr
       case _ => error("Invalid node")
     }
   }
+
+  override def ptrOf[T](seq : SeqNode[T,Long]) = error("not yet")
+  override def nil[T] : SeqNode[T,Long] = error("no nil")
+  override def allocSeq[T](t : T, ptr : Long) : SeqNode[T,Long] = error("no alloc seq")
 
   protected def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
     file.synchronized {
@@ -140,7 +146,7 @@ class DiskAllocator[T](filename : String)(implicit mf : Manifest[T]) extends All
     }
   }
 
-  override def allocLeaf(height : Short, pos : Long, value : T) = {
+  override def allocLeaf[T](height : Short, pos : Long, value : T) = {
     val toWrite = output.synchronized {
       output.clear
       output.writeShort(height, true)
@@ -151,7 +157,7 @@ class DiskAllocator[T](filename : String)(implicit mf : Manifest[T]) extends All
     val ptr = writeBytes(LEAFNODE, toWrite)
     new DiskLeaf[T](ptr, height, pos, value, this)
   }
-  override def allocPtrNode(sz : Long, height : Short, ptrs : Block[Long]) = {
+  override def allocPtrNode[T](sz : Long, height : Short, ptrs : Block[Long]) = {
     val toWrite = output.synchronized {
       output.clear
       output.writeLong(sz, true)
@@ -167,8 +173,8 @@ class DiskAllocator[T](filename : String)(implicit mf : Manifest[T]) extends All
   }
 }
 
-class DiskLeaf[T](val ptr : Long, hs : Short, ps : Long, v : T, m : Allocator[T,Long]) extends
+class DiskLeaf[T](val ptr : Long, hs : Short, ps : Long, v : T, m : Allocator[Long]) extends
   Leaf[T,Long](hs, ps, v, m)
 
 class DiskPtrNode[T](val ptr : Long, sz : Long, height : Short, ptrs : Block[Long],
-  mem : Allocator[T,Long]) extends PtrNode[T,Long](sz, height, ptrs, mem)
+  mem : Allocator[Long]) extends PtrNode[T,Long](sz, height, ptrs, mem)

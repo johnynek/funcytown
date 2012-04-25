@@ -1,18 +1,78 @@
 package com.twitter.funcytown
 
 import scala.annotation.tailrec
+import scala.collection.immutable.LinearSeq
 
 object Allocator extends LowPriorityAllocator {
   // TODO add disk allocators
 }
 
-trait Allocator[T, @specialized(Long) PtrT] {
+trait Allocator[@specialized(Long) PtrT] {
   val nullPtr : PtrT
-  def deref(ptr : PtrT) : Node[T,PtrT]
-  def ptrOf(node : Node[T,PtrT]) : PtrT
-  def empty(height : Short): PtrNode[T,PtrT]
-  def allocLeaf(height : Short, pos : Long, value : T) : Leaf[T,PtrT]
-  def allocPtrNode(sz : Long, height : Short, ptrs : Block[PtrT]) : PtrNode[T,PtrT]
+  def deref(ptr : PtrT) : AnyRef
+  def ptrOf[T](node : Node[T,PtrT]) : PtrT
+  def ptrOf[T](sn : SeqNode[T,PtrT]) : PtrT
+  def empty[T](height : Short): PtrNode[T,PtrT]
+  def nil[T] : SeqNode[T,PtrT]
+  def allocSeq[T](t : T, ptr : PtrT) : SeqNode[T,PtrT]
+  def allocLeaf[T](height : Short, pos : Long, value : T) : Leaf[T,PtrT]
+  def allocPtrNode[T](sz : Long, height : Short, ptrs : Block[PtrT]) : PtrNode[T,PtrT]
+}
+
+object SeqNode {
+  def apply[T](items : T*)(implicit mem : Allocator[_]) : SeqNode[T,_] = {
+    // We reverse as we put in:
+    items.foldRight(mem.nil[T]) { (newv, old) => newv :: old }
+  }
+}
+
+/** Allocator agnostic immutable linked list
+ */
+class SeqNode[+T,PtrT](h : T, t : PtrT, mem : Allocator[PtrT]) extends LinearSeq[T] {
+  // This is the cons operator:
+  def ::[U >: T](x: U) : SeqNode[U,PtrT] = mem.allocSeq(x, mem.ptrOf(this))
+
+  def longLength : Long = {
+    @tailrec
+    def lenacc(acc : Long, list : Seq[_]) : Long = {
+      if (list.isEmpty)
+        acc
+      else
+        lenacc(acc + 1L, list.tail)
+    }
+    lenacc(0L, this)
+  }
+
+  override def length : Int = {
+    val len = longLength
+    if (len <= Int.MaxValue) len.toInt else error("Length: " + len + " can't fit in Int")
+  }
+
+  override def apply(idx : Int) : T = get(idx)
+  @tailrec
+  final def get(idx : Long) : T = {
+    if (isEmpty) {
+      error("SeqNode is empty, but get(" + idx + ") was called")
+    }
+    if (idx == 0) {
+      h
+    }
+    else {
+      tail.get(idx - 1L)
+    }
+  }
+  override def isEmpty = (t == mem.nullPtr)
+  override def head = h
+  override def iterator : Iterator[T] = toStream.iterator
+  override def tail = mem.deref(t).asInstanceOf[SeqNode[T,PtrT]]
+  override def toStream : Stream[T] = {
+    if (isEmpty) {
+      Stream.empty
+    }
+    else {
+      Stream.cons(h, tail.toStream)
+    }
+  }
 }
 
 abstract class Node[T,PtrT] {
@@ -34,12 +94,12 @@ abstract class Node[T,PtrT] {
 }
 
 class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
-  mem : Allocator[T,PtrT])(implicit mf : Manifest[PtrT]) extends Node[T,PtrT] {
+  mem : Allocator[PtrT])(implicit mf : Manifest[PtrT]) extends Node[T,PtrT] {
   override def findLeaf(pos : Long) : Option[Leaf[T,PtrT]] = {
     val (thisIdx, nextPos) = Block.toBlockIdx(height, pos)
     val nextPtr = ptrs(thisIdx)
     if (mem.nullPtr != nextPtr) {
-      val nextNode = mem.deref(nextPtr)
+      val nextNode = mem.deref(nextPtr).asInstanceOf[Node[T,PtrT]]
       nextNode.findLeaf(nextPos)
     }
     else {
@@ -64,7 +124,7 @@ class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
         }
       }
       else {
-        val nextNode = mem.deref(nextPtr)
+        val nextNode = mem.deref(nextPtr).asInstanceOf[Node[T,PtrT]]
         // Replace down the tree:
         val (old, resNode) = nextNode.map(nextPos)(fn)
         (old, mem.ptrOf(resNode), resNode.size - nextNode.size)
@@ -96,7 +156,7 @@ class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
     // Just get the children streams out in order:
     ptrs.foldLeft(Stream.empty[T]) { (oldStream, newPtr) =>
       if (newPtr != mem.nullPtr) {
-        oldStream ++ (mem.deref(newPtr).toStream)
+        oldStream ++ (mem.deref(newPtr).asInstanceOf[Node[T,PtrT]].toStream)
       }
       else {
         oldStream
@@ -105,7 +165,7 @@ class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
   }
 }
 
-class Leaf[T,PtrT](val height : Short, val pos : Long, val value : T, mem : Allocator[T,PtrT])
+class Leaf[T,PtrT](val height : Short, val pos : Long, val value : T, mem : Allocator[PtrT])
   (implicit mf : Manifest[PtrT])
   extends Node[T,PtrT] {
   override def isEmpty = false

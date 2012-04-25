@@ -3,22 +3,31 @@ package com.twitter.funcytown
 import scala.annotation.tailrec
 
 trait LowPriorityAllocator {
-  implicit def default[T,_](implicit mf : Manifest[Node[T,_]]) : Allocator[T,_] = {
-    new MemoryAllocator[T]
+  implicit def default(implicit mf : Manifest[AnyRef]) : Allocator[_] = {
+    new MemoryAllocator
   }
 }
 
-class MemoryAllocator[T](implicit mf : Manifest[Node[T,_]]) extends Allocator[T, Node[T,_]] {
-  override val nullPtr : Node[T,_] = null
-  override def deref(ptr : Node[T,_]) = ptr.asInstanceOf[Node[T,Node[T,_]]]
-  override def empty(height : Short) : PtrNode[T,Node[T,_]] = {
-    allocPtrNode(0L, height, Block.alloc[Node[T,_]])
+class MemoryAllocator(implicit mf : Manifest[AnyRef]) extends Allocator[AnyRef] {
+  override val nullPtr : AnyRef = null
+  override def deref(ptr : AnyRef) = ptr
+  override def empty[T](height : Short) : PtrNode[T,AnyRef] = {
+    allocPtrNode(0L, height, Block.alloc[AnyRef])
   }
-  override def ptrOf(node : Node[T,Node[T,_]]) = node
-  override def allocLeaf(height : Short, pos : Long, value : T) = {
+  override def ptrOf[T](node : Node[T,AnyRef]) = node
+  override def ptrOf[T](sn : SeqNode[T,AnyRef]) = sn
+
+  protected val nilSeq = new SeqNode[AnyRef,AnyRef](null, null, this)
+  override def nil[T] : SeqNode[T,AnyRef] = {
+    nilSeq.asInstanceOf[SeqNode[T,AnyRef]]
+  }
+  def allocSeq[T](t : T, ptr : AnyRef) : SeqNode[T,AnyRef] = {
+    new SeqNode(t, ptr, this)
+  }
+  override def allocLeaf[T](height : Short, pos : Long, value : T) = {
     new Leaf(height, pos, value, this)
   }
-  override def allocPtrNode(sz : Long, height : Short, ptrs : Block[Node[T,_]]) = {
-    new PtrNode[T,Node[T,_]](sz, height, ptrs, this)
+  override def allocPtrNode[T](sz : Long, height : Short, ptrs : Block[AnyRef]) = {
+    new PtrNode[T,AnyRef](sz, height, ptrs, this)
   }
 }
