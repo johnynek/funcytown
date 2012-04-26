@@ -21,16 +21,51 @@ trait Allocator[@specialized(Long) PtrT] {
 
 object SeqNode {
   def apply[T](items : T*)(implicit mem : Allocator[_]) : SeqNode[T,_] = {
+    from(items)(mem)
+  }
+
+  def from[T](iter : Iterable[T])(implicit mem : Allocator[_]) = {
+    concat(iter,mem.nil[T])
+  }
+
+  def concat[T, U >: T, PtrT](iter : Iterable[U], seq : SeqNode[T,PtrT]) : SeqNode[U,PtrT] = {
+    // This is safe because of the type constraint
+    val sequ : SeqNode[U,PtrT] = seq
     // We reverse as we put in:
-    items.foldRight(mem.nil[T]) { (newv, old) => newv :: old }
+    iter.foldRight(sequ) { (newv, old) => newv :: old }
   }
 }
 
 /** Allocator agnostic immutable linked list
  */
-class SeqNode[+T,PtrT](h : T, t : PtrT, mem : Allocator[PtrT]) extends LinearSeq[T] {
+class SeqNode[+T,PtrT](h : T, t : PtrT, val alloc : Allocator[PtrT]) extends LinearSeq[T] {
   // This is the cons operator:
-  def ::[U >: T](x: U) : SeqNode[U,PtrT] = mem.allocSeq(x, mem.ptrOf(this))
+  def debugStr : String = "(" + h + ", " + t + ")"
+  def ::[U >: T](x: U) : SeqNode[U,PtrT] = {
+    alloc.allocSeq(x, alloc.ptrOf(this))
+  }
+
+  def :::[U >: T](iter : Iterable[U]) : SeqNode[U,PtrT] = SeqNode.concat(iter, this)
+
+  def ++[U >: T](iter : Iterable[U]) : SeqNode[U,PtrT] = {
+    val seqiter : SeqNode[U,PtrT] = if (iter.isInstanceOf[SeqNode[U,_]] &&
+      (iter.asInstanceOf[SeqNode[U,PtrT]].alloc == alloc)) {
+      // No need to convert:
+      iter.asInstanceOf[SeqNode[U,PtrT]]
+    }
+    else {
+      SeqNode.from(iter)(alloc).asInstanceOf[SeqNode[U,PtrT]]
+    }
+    SeqNode.concat(this, seqiter)
+  }
+
+  override def foldRight[U](init : U)(foldfn : (T,U) => U) : U = {
+    reverse.foldLeft(init) { (prev, item) => foldfn(item, prev) }
+  }
+
+  override def foldLeft[U](init : U)(foldfn : (U,T) => U) : U = {
+    toStream.foldLeft(init)(foldfn)
+  }
 
   def longLength : Long = {
     @tailrec
@@ -61,10 +96,14 @@ class SeqNode[+T,PtrT](h : T, t : PtrT, mem : Allocator[PtrT]) extends LinearSeq
       tail.get(idx - 1L)
     }
   }
-  override def isEmpty = (t == mem.nullPtr)
+  override def isEmpty = (t == alloc.nullPtr)
   override def head = h
   override def iterator : Iterator[T] = toStream.iterator
-  override def tail = mem.deref(t).asInstanceOf[SeqNode[T,PtrT]]
+  override lazy val reverse : SeqNode[T,PtrT] = {
+    foldLeft(alloc.nil[T]) { (list, item) => item :: list }
+  }
+
+  override def tail = alloc.deref(t).asInstanceOf[SeqNode[T,PtrT]]
   override def toStream : Stream[T] = {
     if (isEmpty) {
       Stream.empty

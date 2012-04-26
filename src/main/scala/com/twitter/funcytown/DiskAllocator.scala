@@ -19,6 +19,7 @@ object DiskAllocator {
   }
 }
 
+// Using the collection builder stuff, I bet you can do this correctly for anything with a builder
 class ScalaListSerializer[T] extends KSerializer[List[T]] {
   override def write(k : Kryo, out : KOutput, obj : List[T]) {
     out.writeInt(obj.size, true)
@@ -53,20 +54,21 @@ class DiskAllocator(filename : String) extends Allocator[Long] {
   kryo.register(this.getClass, new SingletonSerializer(this))
   kryo.register(None.getClass, new SingletonSerializer(None))
   kryo.register(Nil.getClass, new SingletonSerializer(Nil))
-
+  // Use objensis for better support of scala objects:
   kryo.setInstantiatorStrategy(new StdInstantiatorStrategy());
 
-  // TODO: we can read independently of reading, and writing just appends
+  // TODO we can probably read and write independently
   private val file = new RandomAccessFile(filename,"rw")
   // We have to init to avoid writing something in the "null" offset of 0:
   file.writeInt(0x5ca1ab1e)
+  // Where to seek before each write, only changed inside the file lock
+  private var eofPtr = file.getFilePointer
   private val output = new KOutput(4096, 1 << 20)
   private val emptyPtrNodes = MHash[Short, DiskPtrNode[_]]()
 
   val LEAFNODE = 1 : Byte
   val PTRNODE = 2 : Byte
-  // Minimal amount to read to compute the length to read:
-  val headerSize = 5
+  val SEQNODE = 3 : Byte
 
   override val nullPtr : Long = 0L
   override def deref(ptr : Long) = {
@@ -85,6 +87,7 @@ class DiskAllocator(filename : String) extends Allocator[Long] {
       // This is ugly, but this method is not type safe anyway
       case LEAFNODE => readLeaf[AnyRef](ptr, buf)
       case PTRNODE => readPtrNode[AnyRef](ptr, buf)
+      case SEQNODE => readSeqNode[AnyRef](ptr, buf)
       case _ => error("Unrecognized node type: " + objType)
     }
   }
@@ -115,6 +118,14 @@ class DiskAllocator(filename : String) extends Allocator[Long] {
     new DiskPtrNode[T](ptr, treeSize, height, blk, this)
   }
 
+  protected def readSeqNode[T](ptr : Long, buf : Array[Byte]) : DiskSeq[T] = {
+    val input = new KInput(buf)
+    // These bool parameters mean optimize for positive sizes:
+    val tail = input.readLong(true)
+    val head = kryo.readClassAndObject(input).asInstanceOf[T]
+    new DiskSeq[T](ptr, head, tail, this)
+  }
+
   override def empty[T](height : Short) : PtrNode[T,Long] = {
     emptyPtrNodes.synchronized {
       emptyPtrNodes.getOrElseUpdate(height,
@@ -132,16 +143,32 @@ class DiskAllocator(filename : String) extends Allocator[Long] {
     }
   }
 
-  override def ptrOf[T](seq : SeqNode[T,Long]) = error("not yet")
-  override def nil[T] : SeqNode[T,Long] = error("no nil")
-  override def allocSeq[T](t : T, ptr : Long) : SeqNode[T,Long] = error("no alloc seq")
+  override def ptrOf[T](seq : SeqNode[T,Long]) = {
+    seq.asInstanceOf[DiskSeq[T]].ptr
+  }
+
+  protected val NIL = allocSeq[AnyRef](null, nullPtr)
+  override def nil[T] : SeqNode[T,Long] = NIL.asInstanceOf[SeqNode[T,Long]]
+  override def allocSeq[T](h : T, tail : Long) : SeqNode[T,Long] = {
+    val toWrite = output.synchronized {
+      output.clear
+      output.writeLong(tail, true)
+      kryo.writeClassAndObject(output, h)
+      output.toBytes
+    }
+    val ptr = writeBytes(SEQNODE, toWrite)
+    new DiskSeq[T](ptr, h, tail, this)
+  }
 
   protected def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
     file.synchronized {
-      val thisPtr = file.getFilePointer
+      val thisPtr = eofPtr
+      file.seek(eofPtr)
       file.writeByte(objType)
       file.writeInt(toWrite.length)
       file.write(toWrite)
+      // Remember where to seek to before next write
+      eofPtr = file.getFilePointer
       thisPtr
     }
   }
@@ -157,6 +184,7 @@ class DiskAllocator(filename : String) extends Allocator[Long] {
     val ptr = writeBytes(LEAFNODE, toWrite)
     new DiskLeaf[T](ptr, height, pos, value, this)
   }
+
   override def allocPtrNode[T](sz : Long, height : Short, ptrs : Block[Long]) = {
     val toWrite = output.synchronized {
       output.clear
@@ -178,3 +206,6 @@ class DiskLeaf[T](val ptr : Long, hs : Short, ps : Long, v : T, m : Allocator[Lo
 
 class DiskPtrNode[T](val ptr : Long, sz : Long, height : Short, ptrs : Block[Long],
   mem : Allocator[Long]) extends PtrNode[T,Long](sz, height, ptrs, mem)
+
+class DiskSeq[T](val ptr : Long, h : T, t : Long, mem : Allocator[Long])
+  extends SeqNode[T,Long](h, t, mem)
