@@ -44,7 +44,50 @@ class SingletonSerializer[T](inst : T) extends KSerializer[T] {
   override def create(k : Kryo, in : KInput, stype : Class[T]) : T = inst
 }
 
-class DiskAllocator(filename : String) extends Allocator[Long] {
+trait ByteStorage {
+  // read the data at pos and return the header byte, and the header byte, and bytearray
+  def readBytes(pos : Long) : (Byte, Array[Byte])
+  // the inverse of the above
+  def writeBytes(header : Byte, toWrite : Array[Byte]) : Long
+}
+
+trait FileStorage extends ByteStorage {
+
+  val file : RandomAccessFile
+  // Where to seek before each write, only changed inside the file lock
+  private var eofPtr = 0L
+  def init {
+    // We have to init to avoid writing something in the "null" offset of 0:
+    file.writeInt(0x5ca1ab1e)
+    eofPtr = file.getFilePointer
+  }
+
+  def readBytes(ptr : Long) : (Byte, Array[Byte]) = {
+    file.synchronized {
+      file.seek(ptr)
+      val objType = file.readByte
+      val len = file.readInt
+      val buf = new Array[Byte](len)
+      file.readFully(buf)
+      (objType, buf)
+    }
+  }
+
+  def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
+    file.synchronized {
+      val thisPtr = eofPtr
+      file.seek(eofPtr)
+      file.writeByte(objType)
+      file.writeInt(toWrite.length)
+      file.write(toWrite)
+      // Remember where to seek to before next write
+      eofPtr = file.getFilePointer
+      thisPtr
+    }
+  }
+}
+
+abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
 
   val kryo = new Kryo
   // Accept everything for now:
@@ -57,12 +100,6 @@ class DiskAllocator(filename : String) extends Allocator[Long] {
   // Use objensis for better support of scala objects:
   kryo.setInstantiatorStrategy(new StdInstantiatorStrategy());
 
-  // TODO we can probably read and write independently
-  private val file = new RandomAccessFile(filename,"rw")
-  // We have to init to avoid writing something in the "null" offset of 0:
-  file.writeInt(0x5ca1ab1e)
-  // Where to seek before each write, only changed inside the file lock
-  private var eofPtr = file.getFilePointer
   private val output = new KOutput(4096, 1 << 20)
   private val emptyPtrNodes = MHash[Short, DiskPtrNode[_]]()
 
@@ -75,14 +112,7 @@ class DiskAllocator(filename : String) extends Allocator[Long] {
     if (ptr == 0L) {
       error("Trying to deref 0")
     }
-    val (objType, buf) = file.synchronized {
-      file.seek(ptr)
-      val objType = file.readByte
-      val len = file.readInt
-      val buf = new Array[Byte](len)
-      file.readFully(buf)
-      (objType, buf)
-    }
+    val (objType, buf) = readBytes(ptr)
     objType match {
       // This is ugly, but this method is not type safe anyway
       case LEAFNODE => readLeaf[AnyRef](ptr, buf)
@@ -147,7 +177,7 @@ class DiskAllocator(filename : String) extends Allocator[Long] {
     seq.asInstanceOf[DiskSeq[T]].ptr
   }
 
-  protected val NIL = allocSeq[AnyRef](null, nullPtr)
+  protected lazy val NIL = allocSeq[AnyRef](null, nullPtr)
   override def nil[T] : SeqNode[T,Long] = NIL.asInstanceOf[SeqNode[T,Long]]
   override def allocSeq[T](h : T, tail : Long) : SeqNode[T,Long] = {
     val toWrite = output.synchronized {
@@ -158,19 +188,6 @@ class DiskAllocator(filename : String) extends Allocator[Long] {
     }
     val ptr = writeBytes(SEQNODE, toWrite)
     new DiskSeq[T](ptr, h, tail, this)
-  }
-
-  protected def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
-    file.synchronized {
-      val thisPtr = eofPtr
-      file.seek(eofPtr)
-      file.writeByte(objType)
-      file.writeInt(toWrite.length)
-      file.write(toWrite)
-      // Remember where to seek to before next write
-      eofPtr = file.getFilePointer
-      thisPtr
-    }
   }
 
   override def allocLeaf[T](height : Short, pos : Long, value : T) = {
@@ -199,6 +216,12 @@ class DiskAllocator(filename : String) extends Allocator[Long] {
     val ptr = writeBytes(PTRNODE, toWrite)
     new DiskPtrNode[T](ptr, sz, height, ptrs, this)
   }
+}
+
+class DiskAllocator(filename : String) extends ByteAllocator with FileStorage {
+  override val file = new RandomAccessFile(filename,"rw")
+  // initialize the file:
+  this.init
 }
 
 class DiskLeaf[T](val ptr : Long, hs : Short, ps : Long, v : T, m : Allocator[Long]) extends
