@@ -14,6 +14,8 @@ libraryDependencies += "org.scala-tools.testing" % "specs_2.8.1" % "1.6.6" % "te
 
 libraryDependencies += "com.twitter" % "kryo" % "2.04"
 
+libraryDependencies += "org.apache.directory.studio" % "org.apache.commons.collections" % "3.2.1"
+
 parallelExecution in Test := false
 
 seq(assemblySettings: _*)

@@ -12,6 +12,10 @@ import org.objenesis.strategy.StdInstantiatorStrategy;
 import scala.annotation.tailrec
 import scala.collection.mutable.{HashMap => MHash}
 import scala.collection.immutable.LinearSeq
+import scala.actors.Actor
+import scala.actors.Actor._
+
+import org.apache.commons.collections.LRUMap
 
 object DiskAllocator {
   def newHash[K,V](filename : String, tups : (K,V)*) = {
@@ -55,6 +59,7 @@ trait FileStorage extends ByteStorage {
 
   val file : RandomAccessFile
   // Where to seek before each write, only changed inside the file lock
+  private val eofPtrLock = new Object
   private var eofPtr = 0L
   def init {
     // We have to init to avoid writing something in the "null" offset of 0:
@@ -73,18 +78,87 @@ trait FileStorage extends ByteStorage {
     }
   }
 
-  def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
-    file.synchronized {
+
+  // This finds a pointer without blocking on the file lock
+  // in principle, this allows a separate thread to handle writing
+  protected def getPointer(objType : Byte, toWrite : Array[Byte]) : Long = {
+    eofPtrLock.synchronized {
       val thisPtr = eofPtr
-      file.seek(eofPtr)
-      file.writeByte(objType)
-      file.writeInt(toWrite.length)
-      file.write(toWrite)
-      // Remember where to seek to before next write
-      eofPtr = file.getFilePointer
+      // update the pointer:
+      eofPtr = thisPtr + (1 + 4 + toWrite.size)
       thisPtr
     }
   }
+
+  def writeAt(pos : Long, objType : Byte, toWrite : Array[Byte]) {
+    file.synchronized {
+      file.seek(pos)
+      file.writeByte(objType)
+      file.writeInt(toWrite.length)
+      file.write(toWrite)
+    }
+  }
+
+  def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
+    val ptr = getPointer(objType, toWrite)
+    writeAt(ptr, objType, toWrite)
+    ptr
+  }
+}
+
+trait AsyncWriterStorage extends FileStorage {
+  case class WriteRecord(pos : Long, objType : Byte, data : Array[Byte])
+
+  protected val writingActor = new Actor {
+    def act() {
+      loop {
+        react {
+          case WriteRecord(pos,objType,data) => writeAt(pos, objType, data)
+        }
+      }
+    }
+  }
+
+  override def init {
+    super.init
+    writingActor.start
+  }
+
+  override def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
+    val ptr = getPointer(objType, toWrite)
+    writingActor ! WriteRecord(ptr, objType, toWrite)
+    ptr
+  }
+}
+
+trait ByteCachingStorage extends AsyncWriterStorage {
+  // write into a cache, use akka to have an actor own the cache
+  // read from the cache, on misses hit file, fill cache
+  val cachedItems : Int
+
+  protected val cache = new LRUMap(cachedItems)
+
+  override def readBytes(ptr : Long) : (Byte, Array[Byte]) = {
+    val boxedPtr = ptr.asInstanceOf[AnyRef]
+    val cached = cache.synchronized { cache.get(boxedPtr) }
+    if (cached == null) {
+      //We need to actually read off disk:
+      val toCache = super.readBytes(ptr)
+      cache.synchronized { cache.put(boxedPtr, toCache) }
+      toCache
+    }
+    else {
+      // return the cached value:
+      cached.asInstanceOf[(Byte,Array[Byte])]
+    }
+  }
+
+  override def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
+    val ptr = super.writeBytes(objType, toWrite)
+    cache.synchronized { cache.put(ptr.asInstanceOf[AnyRef], (objType, toWrite)) }
+    ptr
+  }
+
 }
 
 abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
@@ -179,6 +253,10 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
 
   protected lazy val NIL = allocSeq[AnyRef](null, nullPtr)
   override def nil[T] : SeqNode[T,Long] = NIL.asInstanceOf[SeqNode[T,Long]]
+
+  // If we want to cache or do some other post processing
+  protected def afterAlloc[Col](ptr : Long, obj : Col) : Col = obj
+
   override def allocSeq[T](h : T, tail : Long) : SeqNode[T,Long] = {
     val toWrite = output.synchronized {
       output.clear
@@ -187,7 +265,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
       output.toBytes
     }
     val ptr = writeBytes(SEQNODE, toWrite)
-    new DiskSeq[T](ptr, h, tail, this)
+    afterAlloc(ptr, new DiskSeq[T](ptr, h, tail, this))
   }
 
   override def allocLeaf[T](height : Short, pos : Long, value : T) = {
@@ -199,7 +277,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
       output.toBytes
     }
     val ptr = writeBytes(LEAFNODE, toWrite)
-    new DiskLeaf[T](ptr, height, pos, value, this)
+    afterAlloc(ptr, new DiskLeaf[T](ptr, height, pos, value, this))
   }
 
   override def allocPtrNode[T](sz : Long, height : Short, ptrs : Block[Long]) = {
@@ -214,7 +292,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
       output.toBytes
     }
     val ptr = writeBytes(PTRNODE, toWrite)
-    new DiskPtrNode[T](ptr, sz, height, ptrs, this)
+    afterAlloc(ptr, new DiskPtrNode[T](ptr, sz, height, ptrs, this))
   }
 }
 
@@ -222,6 +300,39 @@ class DiskAllocator(filename : String) extends ByteAllocator with FileStorage {
   override val file = new RandomAccessFile(filename,"rw")
   // initialize the file:
   this.init
+}
+
+// Caches the actual objects, not the bytes read
+class CachingDiskAllocator(filename : String, cachedItems : Int)
+  extends ByteAllocator with AsyncWriterStorage {
+
+  protected val cache = new LRUMap(cachedItems)
+  override val file = new RandomAccessFile(filename,"rw")
+
+  // initialize the file, start the write thread
+  this.init
+
+  override def deref(ptr : Long) : AnyRef = {
+    val boxedPtr = ptr.asInstanceOf[AnyRef]
+    val cached = cache.synchronized { cache.get(boxedPtr) }
+    if (cached == null) {
+      //We need to actually read off disk:
+      val toCache = super.deref(ptr)
+      cache.synchronized { cache.put(boxedPtr, toCache) }
+      toCache
+    }
+    else {
+      // return the cached value:
+      cached
+    }
+  }
+
+  override def afterAlloc[T](ptr : Long, obj : T) : T = {
+    val boxedPtr = ptr.asInstanceOf[AnyRef]
+    // Make sure the allocation is in the read cache, since writing is async
+    cache.synchronized { cache.put(boxedPtr, obj) }
+    obj
+  }
 }
 
 class DiskLeaf[T](val ptr : Long, hs : Short, ps : Long, v : T, m : Allocator[Long]) extends
