@@ -9,7 +9,8 @@ object HashMap {
     }
   }
   def empty[K,V](implicit mem : Allocator[_]) : HashMap[K,V] = {
-    new HashMap(0, Block.BITMASK, mem.empty[sciList[HashEntry[K,V]]](0), mem)
+    //new HashMap(0, Block.BITMASK, mem.empty[sciList[HashEntry[K,V]]](0), mem)
+    new HashMap(0, Block.bitmaskOf((64 / Block.SHIFT) * Block.SHIFT - 1), mem.empty[sciList[HashEntry[K,V]]](0), mem)
   }
 }
 
@@ -60,7 +61,9 @@ class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[sciList[Has
       }
     val newNode = oldValNewNode._2
     val nht = new HashMap[K,V1](newSize, bitmask, newNode, mem)
-    if (longSize > 4 * bitmask) {
+    //if (longSize > 4 * bitmask) {
+    // The Node is sparse data structure and we don't need to use a bitmask
+    if (false) {
       // TODO maybe we should ask the allocator for the next allocator here
       nht.rehash((bitmask << 1) | 1L, mem)
     }
@@ -95,7 +98,9 @@ class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[sciList[Has
       }
     val newNode = oldValNewNode._2
     val nht = new HashMap[K,V](newSize, bitmask, newNode, mem)
-    if (longSize < (bitmask / 4)) {
+    // The Node is sparse data structure and we don't need to use a bitmask
+    //if (longSize < (bitmask / 4)) {
+    if (false) {
       nht.rehash((bitmask >> 1) | Block.BITMASK, mem)
     }
     else {

@@ -12,7 +12,7 @@ object Block {
     if (cnt <= 0) bm else bitmaskOf(cnt - 1, (bm << 1) | 1)
   }
   //val SHIFT = shiftOf(BITMASK)
-  val SHIFT = 6
+  val SHIFT = 5
   val BITMASK = bitmaskOf(SHIFT).toInt
   def alloc[T](implicit mf : Manifest[T]) : Block[T] = {
     new Block[T](BITMASK, mf.newArray(BITMASK + 1))
