@@ -5,7 +5,7 @@ import scala.collection.immutable.{List => sciList}
 abstract class Node[T,PtrT] {
   def apply(pos : Long) = get(pos).get
   def get(pos : Long) : Option[T] = findLeaf(pos).map { _.value }
-  def isEmpty : Boolean = (size == 0)
+  def isEmpty : Boolean
   def findLeaf(pos : Long) : Option[Leaf[T, PtrT]]
   def put(pos : Long, value : T) : Node[T, PtrT] = {
     // Just replace:
@@ -15,13 +15,17 @@ abstract class Node[T,PtrT] {
     // Just erase whatever is there:
     map(pos) { old => None }
   }
-  def size : Long
   def map(pos : Long)(fn : Option[T] => Option[T]) : (Option[T], Node[T,PtrT])
   def toStream : Stream[T]
 }
 
-class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
+class PtrNode[T, PtrT](val height : Short, val ptrs : Block[PtrT],
   mem : Allocator[PtrT])(implicit mf : Manifest[PtrT]) extends Node[T,PtrT] {
+  override def isEmpty : Boolean = {
+    ptrs.foldLeft(true) { (empty, ptr) =>
+      empty && ((ptr == mem.nullPtr) || mem.deref(ptr).asInstanceOf[Node[T,PtrT]].isEmpty)
+    }
+  }
   override def findLeaf(pos : Long) : Option[Leaf[T,PtrT]] = {
     val (thisIdx, nextPos) = Block.toBlockIdx(height, pos)
     val nextPtr = ptrs(thisIdx)
@@ -38,15 +42,15 @@ class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
   override def map(pos : Long)(fn : Option[T] => Option[T]) : (Option[T], Node[T,PtrT]) = {
     val (thisIdx, nextPos) = Block.toBlockIdx(height, pos)
     val nextPtr = ptrs(thisIdx)
-    val (oldVal, newPtr, szdelta) = if (mem.nullPtr == nextPtr) {
+    val (oldVal, newPtr) = if (mem.nullPtr == nextPtr) {
       val value = fn(None)
       if (value.isDefined) {
         // This is a new value:
-        (None, mem.ptrOf(mem.allocLeaf((height + 1).toShort, nextPos, value.get)), 1L)
+        (None, mem.ptrOf(mem.allocLeaf((height + 1).toShort, nextPos, value.get)))
       }
       else {
         // Mapping None => None, weird, but okay.
-        (None, mem.nullPtr, 0L)
+        (None, mem.nullPtr)
       }
     }
     else {
@@ -54,12 +58,11 @@ class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
       val nextNode = mem.deref(nextPtr).asInstanceOf[Node[T,PtrT]]
       // Replace down the tree:
       val (old, resNode) = nextNode.map(nextPos)(fn)
-      (old, mem.ptrOf(resNode), resNode.size - nextNode.size)
+      (old, mem.ptrOf(resNode))
     }
-    (oldVal, mem.allocPtrNode(sz + szdelta, height, ptrs.updated(thisIdx, newPtr)))
+    (oldVal, mem.allocPtrNode(height, ptrs.updated(thisIdx, newPtr)))
   }
 
-  override def size = sz
 
   override def toStream : Stream[T] = {
     // Just get the children streams out in order:
@@ -73,7 +76,7 @@ class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
     }
   }
   override def toString = {
-    sciList("PtrNode(", sz, height, ptrs, ")").mkString(", ")
+    sciList("PtrNode(", height, ptrs, ")").mkString(", ")
   }
 }
 
@@ -119,7 +122,6 @@ class Leaf[T,PtrT](val height : Short, val pos : Long, val value : T, mem : Allo
       }
     }
   }
-  override def size = 1L
   override def toStream = Stream(value)
   override def toString = {
     sciList("LeafNode(", height, pos, value, ")").mkString(", ")

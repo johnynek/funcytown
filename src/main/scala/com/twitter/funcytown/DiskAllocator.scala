@@ -220,7 +220,6 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   protected def readPtrNode[T](ptr : Long, buf : Array[Byte]) : DiskPtrNode[T] = {
     val input = new KInput(buf)
     // These bool parameters mean optimize for positive sizes:
-    val treeSize = input.readLong(true)
     val height = input.readShort(true)
     // Read the array:
     val blockAry = new Array[Long](Block.BITMASK + 1)
@@ -231,7 +230,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
       idx = idx + 1
     }
     val blk = new Block[Long](Block.BITMASK, blockAry)
-    new DiskPtrNode[T](ptr, treeSize, height, blk, this)
+    new DiskPtrNode[T](ptr, height, blk, this)
   }
 
   protected def readList[T](ptr : Long, buf : Array[Byte]) : DiskSeq[T] = {
@@ -245,7 +244,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   override def empty[T](height : Short) : PtrNode[T,Long] = {
     emptyPtrNodes.synchronized {
       emptyPtrNodes.getOrElseUpdate(height,
-        allocPtrNode(0L, height, Block.alloc[Long])
+        allocPtrNode(height, Block.alloc[Long])
       )
       .asInstanceOf[PtrNode[T,Long]]
     }
@@ -292,10 +291,9 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
     afterAlloc(ptr, new DiskLeaf[T](ptr, height, pos, value, this))
   }
 
-  override def allocPtrNode[T](sz : Long, height : Short, ptrs : Block[Long]) = {
+  override def allocPtrNode[T](height : Short, ptrs : Block[Long]) = {
     val toWrite = output.synchronized {
       output.clear
-      output.writeLong(sz, true)
       output.writeShort(height, true)
       ptrs.foldLeft(output) { (oldOut, thisVal) =>
         oldOut.writeLong(thisVal, true)
@@ -304,7 +302,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
       output.toBytes
     }
     val ptr = writeBytes(PTRNODE, toWrite)
-    afterAlloc(ptr, new DiskPtrNode[T](ptr, sz, height, ptrs, this))
+    afterAlloc(ptr, new DiskPtrNode[T](ptr, height, ptrs, this))
   }
 }
 
@@ -364,8 +362,8 @@ class CachingDiskAllocator(cachedItems : Int, filename : String = null)
 class DiskLeaf[T](val ptr : Long, hs : Short, ps : Long, v : T, m : Allocator[Long]) extends
   Leaf[T,Long](hs, ps, v, m)
 
-class DiskPtrNode[T](val ptr : Long, sz : Long, height : Short, ptrs : Block[Long],
-  mem : Allocator[Long]) extends PtrNode[T,Long](sz, height, ptrs, mem)
+class DiskPtrNode[T](val ptr : Long, height : Short, ptrs : Block[Long],
+  mem : Allocator[Long]) extends PtrNode[T,Long](height, ptrs, mem)
 
 class DiskSeq[T](val ptr : Long, h : T, t : Long, mem : Allocator[Long])
   extends List[T,Long](h, t, mem)

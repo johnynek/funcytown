@@ -4,7 +4,7 @@ class MemoryAllocator(implicit mf : Manifest[AnyRef]) extends Allocator[AnyRef] 
   override val nullPtr : AnyRef = null
   override def deref(ptr : AnyRef) = ptr
   override def empty[T](height : Short) : PtrNode[T,AnyRef] = {
-    allocPtrNode(0L, height, Block.alloc[AnyRef])
+    allocPtrNode(height, Block.alloc[AnyRef])
   }
   override def ptrOf[T](node : Node[T,AnyRef]) = node
   override def ptrOf[T](sn : List[T,AnyRef]) = sn
@@ -19,7 +19,7 @@ class MemoryAllocator(implicit mf : Manifest[AnyRef]) extends Allocator[AnyRef] 
   override def allocLeaf[T](height : Short, pos : Long, value : T) = {
     new Leaf(height, pos, value, this)
   }
-  override def allocPtrNode[T](sz : Long, height : Short, ptrs : Block[AnyRef]) = {
-    new PtrNode[T,AnyRef](sz, height, ptrs, this)
+  override def allocPtrNode[T](height : Short, ptrs : Block[AnyRef]) = {
+    new PtrNode[T,AnyRef](height, ptrs, this)
   }
 }
