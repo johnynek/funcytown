@@ -2,8 +2,6 @@ package com.twitter.funcytown
 
 import scala.collection.immutable.{List => sciList}
 
-import scala.annotation.tailrec
-
 object HashMap {
   def apply[K,V](tups : Tuple2[K,V]*)(implicit mem : Allocator[_]) : HashMap[K,V] = {
     tups.foldLeft(empty[K,V](mem)) { (old, tupE) =>

@@ -1,7 +1,5 @@
 package com.twitter.funcytown
 
-import scala.annotation.tailrec
-
 class MemoryAllocator(implicit mf : Manifest[AnyRef]) extends Allocator[AnyRef] {
   override val nullPtr : AnyRef = null
   override def deref(ptr : AnyRef) = ptr

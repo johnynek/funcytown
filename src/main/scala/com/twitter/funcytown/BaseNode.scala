@@ -1,7 +1,5 @@
 package com.twitter.funcytown
 
-import scala.annotation.tailrec
-
 abstract class Node[T,PtrT] {
   def apply(pos : Long) = get(pos).get
   def get(pos : Long) : Option[T] = findLeaf(pos).map { _.value }

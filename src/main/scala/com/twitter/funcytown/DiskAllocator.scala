@@ -9,7 +9,6 @@ import com.esotericsoftware.kryo.{Serializer => KSerializer}
 
 import org.objenesis.strategy.StdInstantiatorStrategy;
 
-import scala.annotation.tailrec
 import scala.collection.mutable.{HashMap => MHash}
 import scala.collection.immutable.LinearSeq
 import scala.collection.immutable.{List => sciList}

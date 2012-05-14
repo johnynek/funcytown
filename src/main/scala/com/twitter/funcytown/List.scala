@@ -25,9 +25,7 @@ object List {
 class List[+T,PtrT](h : T, t : PtrT, val alloc : Allocator[PtrT]) extends LinearSeq[T] {
   // This is the cons operator:
   def debugStr : String = "(" + h + ", " + t + ")"
-  def ::[U >: T](x: U) : List[U,PtrT] = {
-    alloc.allocSeq(x, alloc.ptrOf(this))
-  }
+  def ::[U >: T](x: U) : List[U,PtrT] = alloc.allocSeq(x, alloc.ptrOf(this))
 
   def :::[U >: T](iter : Iterable[U]) : List[U,PtrT] = List.concat(iter, this)
 
