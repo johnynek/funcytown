@@ -34,6 +34,18 @@ class ScalasciListSerializer[T] extends KSerializer[sciList[T]] {
   }
 }
 
+class HashEntrySerializer[K,V](hashfn : K => Long) extends KSerializer[HashEntry[K,V]] {
+  override def write(k : Kryo, out : KOutput, obj : HashEntry[K,V]) {
+    k.writeClassAndObject(out, obj.key.asInstanceOf[AnyRef])
+    k.writeClassAndObject(out, obj.value.asInstanceOf[AnyRef])
+  }
+  override def create(k : Kryo, in : KInput, clazz : Class[HashEntry[K,V]]) : HashEntry[K,V] = {
+    val key = k.readClassAndObject(in).asInstanceOf[K]
+    val value = k.readClassAndObject(in).asInstanceOf[V]
+    new HashEntry(hashfn(key), key, value)
+  }
+}
+
 class SingletonSerializer[T](inst : T) extends KSerializer[T] {
   override def write(k : Kryo, out : KOutput, obj : T) {
     assert(inst == obj, "Singleton serializer only works for one instance")
@@ -183,6 +195,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   kryo.register(this.getClass, new SingletonSerializer(this))
   kryo.register(None.getClass, new SingletonSerializer(None))
   kryo.register(Nil.getClass, new SingletonSerializer(Nil))
+  kryo.register(classOf[HashEntry[AnyRef,AnyRef]], new HashEntrySerializer[AnyRef,AnyRef](_.hashCode.toLong))
   // Use objensis for better support of scala objects:
   kryo.setInstantiatorStrategy(new StdInstantiatorStrategy());
 

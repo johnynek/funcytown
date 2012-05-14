@@ -58,7 +58,8 @@ class PtrNode[T, PtrT](val height : Short, val ptrs : Block[PtrT],
       val nextNode = mem.deref(nextPtr).asInstanceOf[Node[T,PtrT]]
       // Replace down the tree:
       val (old, resNode) = nextNode.map(nextPos)(fn)
-      (old, mem.ptrOf(resNode))
+      // If it is empty, we don't need to store, it, just put null
+      (old, if (resNode.isEmpty) mem.nullPtr else mem.ptrOf(resNode))
     }
     (oldVal, mem.allocPtrNode(height, ptrs.updated(thisIdx, newPtr)))
   }

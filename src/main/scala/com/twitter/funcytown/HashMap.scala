@@ -9,11 +9,21 @@ object HashMap {
     }
   }
   def empty[K,V](implicit mem : Allocator[_]) : HashMap[K,V] = {
-    new HashMap(0, Block.BITMASK, mem.empty[sciList[(Long,K,V)]](0), mem)
+    new HashMap(0, Block.BITMASK, mem.empty[sciList[HashEntry[K,V]]](0), mem)
   }
 }
 
-class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[sciList[(Long,K,V)],_],
+// This is so we make a special Kryo serializer for these objects
+class HashEntry[K,+V](val hash : Long, val key : K, val value : V) {
+  def sameKeyAs(that : HashEntry[K,_]) : Boolean = {
+    // Do the hash comparison first, which should be cheaper
+    (hash == that.hash) && (key == that.key)
+  }
+
+  lazy val keyValue : (K,V) = (key, value)
+}
+
+class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[sciList[HashEntry[K,V]],_],
   val mem : Allocator[_]) extends Map[K,V] {
 
   def rehash[V1 >: V](newbitmask : Long, newMem : Allocator[_]) : HashMap[K,V1] = {
@@ -26,19 +36,18 @@ class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[sciList[(Lo
     }
   }
 
-  protected def longHash(k : K) = (k.hashCode.toLong & bitmask)
+  protected def longHash(k : K) = k.hashCode.toLong
 
-  protected def sameKey(tup1 : (Long,K,_), tup2 : (Long,K,_)) : Boolean = {
-    // Do the hash comparison first, which should be cheaper
-    (tup1._1 == tup2._1) && (tup1._2 == tup2._2)
-  }
+  protected def idxOf(hash : Long) = hash & bitmask
+
+  protected def sameKey(tup1 : HashEntry[K,_], tup2 : HashEntry[K,_]) = tup1.sameKeyAs(tup2)
 
   override def +[V1 >: V](kv : (K,V1)) : HashMap[K,V1] = {
     // Since the list is of any reference type, the cast below is safe:
-    val castNode = node.asInstanceOf[Node[sciList[(Long,K,V1)],_]]
+    val castNode = node.asInstanceOf[Node[sciList[HashEntry[K,V1]],_]]
     val hash = longHash(kv._1)
-    val entryTup = (hash, kv._1, kv._2)
-    val oldValNewNode = castNode.map(entryTup._1) { x =>
+    val entryTup = new HashEntry(hash, kv._1, kv._2)
+    val oldValNewNode = castNode.map(idxOf(entryTup.hash)) { x =>
       Some(entryTup :: (x.getOrElse(Nil).filter { tup => !sameKey(entryTup, tup) }))
     }
     // Let's compute the new size:
@@ -62,8 +71,8 @@ class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[sciList[(Lo
 
   override def -(key : K) : HashMap[K,V] = {
     val hashKey = longHash(key)
-    val oldTupKey = (hashKey, key, null)
-    val oldValNewNode = node.map(hashKey) { stored =>
+    val oldTupKey = new HashEntry(hashKey, key, null)
+    val oldValNewNode = node.map(idxOf(hashKey)) { stored =>
       stored.flatMap { items =>
         val list = items.filter { el =>
           !sameKey(el, oldTupKey)
@@ -96,16 +105,16 @@ class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[sciList[(Lo
 
   override def get(key : K) : Option[V] = {
     val hashKey = longHash(key)
-    val oldTupKey = (hashKey, key, null)
-    node.get(hashKey).flatMap { list =>
+    val oldTupKey = new HashEntry(hashKey, key, null)
+    node.get(idxOf(hashKey)).flatMap { list =>
       list.find { item => sameKey(item, oldTupKey) }
-        .map { _._3 }
+        .map { _.value }
     }
   }
 
   override def iterator : Iterator[(K,V)] = {
     node.toStream.flatMap { list =>
-      list.map { tup => (tup._2, tup._3) }
+      list.map { _.keyValue }
     }.iterator
   }
 
