@@ -51,7 +51,7 @@ class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[sciList[(Lo
       }
     val newNode = oldValNewNode._2
     val nht = new HashMap[K,V1](newSize, bitmask, newNode, mem)
-    if (newNode.size * 2 > bitmask) {
+    if (newNode.size > 4 * bitmask) {
       // TODO maybe we should ask the allocator for the next allocator here
       nht.rehash((bitmask << 1) | 1L, mem)
     }
@@ -86,7 +86,7 @@ class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[sciList[(Lo
       }
     val newNode = oldValNewNode._2
     val nht = new HashMap[K,V](newSize, bitmask, newNode, mem)
-    if (newNode.size / 4 < bitmask) {
+    if (newNode.size < (bitmask / 4)) {
       nht.rehash((bitmask >> 1) | Block.BITMASK, mem)
     }
     else {

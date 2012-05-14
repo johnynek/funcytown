@@ -1,5 +1,7 @@
 package com.twitter.funcytown
 
+import scala.collection.immutable.{List => sciList}
+
 abstract class Node[T,PtrT] {
   def apply(pos : Long) = get(pos).get
   def get(pos : Long) : Option[T] = findLeaf(pos).map { _.value }
@@ -24,6 +26,7 @@ class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
     val (thisIdx, nextPos) = Block.toBlockIdx(height, pos)
     val nextPtr = ptrs(thisIdx)
     if (mem.nullPtr != nextPtr) {
+      // nextPtr has height strictly greater
       val nextNode = mem.deref(nextPtr).asInstanceOf[Node[T,PtrT]]
       nextNode.findLeaf(nextPos)
     }
@@ -33,46 +36,27 @@ class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
   }
 
   override def map(pos : Long)(fn : Option[T] => Option[T]) : (Option[T], Node[T,PtrT]) = {
-    if (pos < maxPos) {
-      // This position cannot possibly be in the tree
-      val (thisIdx, nextPos) = Block.toBlockIdx(height, pos)
-      val nextPtr = ptrs(thisIdx)
-      val (oldVal, newPtr, szdelta) = if (mem.nullPtr == nextPtr) {
-        val value = fn(None)
-        if (value.isDefined) {
-          // This is a new value:
-          (None, mem.ptrOf(mem.allocLeaf(height, nextPos, value.get)), 1L)
-        }
-        else {
-          // Mapping None => None, weird, but okay.
-          (None, mem.nullPtr, 0L)
-        }
+    val (thisIdx, nextPos) = Block.toBlockIdx(height, pos)
+    val nextPtr = ptrs(thisIdx)
+    val (oldVal, newPtr, szdelta) = if (mem.nullPtr == nextPtr) {
+      val value = fn(None)
+      if (value.isDefined) {
+        // This is a new value:
+        (None, mem.ptrOf(mem.allocLeaf((height + 1).toShort, nextPos, value.get)), 1L)
       }
       else {
-        val nextNode = mem.deref(nextPtr).asInstanceOf[Node[T,PtrT]]
-        // Replace down the tree:
-        val (old, resNode) = nextNode.map(nextPos)(fn)
-        (old, mem.ptrOf(resNode), resNode.size - nextNode.size)
+        // Mapping None => None, weird, but okay.
+        (None, mem.nullPtr, 0L)
       }
-      (oldVal, mem.allocPtrNode(sz + szdelta, height, ptrs.updated(thisIdx, newPtr)))
     }
     else {
-      val newValue = fn(None)
-      if (newValue.isDefined) {
-        //We need a level above us:
-        val newBlock = Block.alloc[PtrT].updated(0, mem.ptrOf(this))
-        mem.allocPtrNode(sz, (height + 1).toShort, newBlock).map(pos)(fn)
-      }
-      else {
-        //None => None
-        (None, this)
-      }
+      // nextPtr has height strictly greater
+      val nextNode = mem.deref(nextPtr).asInstanceOf[Node[T,PtrT]]
+      // Replace down the tree:
+      val (old, resNode) = nextNode.map(nextPos)(fn)
+      (old, mem.ptrOf(resNode), resNode.size - nextNode.size)
     }
-  }
-
-  private def maxPos : Long = {
-    // This is 2^(7*(height + 1))
-    1 << (Block.SHIFT * (height + 1))
+    (oldVal, mem.allocPtrNode(sz + szdelta, height, ptrs.updated(thisIdx, newPtr)))
   }
 
   override def size = sz
@@ -87,6 +71,9 @@ class PtrNode[T, PtrT](sz : Long, val height : Short, val ptrs : Block[PtrT],
         oldStream
       }
     }
+  }
+  override def toString = {
+    sciList("PtrNode(", sz, height, ptrs, ")").mkString(", ")
   }
 }
 
@@ -134,4 +121,7 @@ class Leaf[T,PtrT](val height : Short, val pos : Long, val value : T, mem : Allo
   }
   override def size = 1L
   override def toStream = Stream(value)
+  override def toString = {
+    sciList("LeafNode(", height, pos, value, ")").mkString(", ")
+  }
 }

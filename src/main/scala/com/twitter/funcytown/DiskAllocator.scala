@@ -66,13 +66,22 @@ trait FileStorage extends ByteStorage {
   }
 
   def readBytes(ptr : Long) : (Byte, Array[Byte]) = {
-    file.synchronized {
-      file.seek(ptr)
-      val objType = file.readByte
-      val len = file.readInt
-      val buf = new Array[Byte](len)
-      file.readFully(buf)
-      (objType, buf)
+    try {
+      file.synchronized {
+        file.seek(ptr)
+        val objType = file.readByte
+        val len = file.readInt
+        val buf = new Array[Byte](len)
+        file.readFully(buf)
+        (objType, buf)
+      }
+    }
+    catch {
+      case x: java.io.EOFException => {
+        //This happens if the node falls out of cache before it is actually read
+        Thread.sleep(1) //Sleep 1 ms and try again:
+        readBytes(ptr)
+      }
     }
   }
 
@@ -109,6 +118,7 @@ trait AsyncWriterStorage extends FileStorage {
   case object Stop
 
   protected val writingActor = new Actor {
+
     def act() {
       loop {
         react {
@@ -203,7 +213,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
     // These bool parameters mean optimize for positive sizes:
     val height = input.readShort(true)
     val pos = input.readLong(true)
-    val obj = kryo.readClassAndObject(input).asInstanceOf[T]
+    val obj = kryo.synchronized { kryo.readClassAndObject(input).asInstanceOf[T] }
     new DiskLeaf[T](ptr, height, pos, obj, this)
   }
 
@@ -228,7 +238,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
     val input = new KInput(buf)
     // These bool parameters mean optimize for positive sizes:
     val tail = input.readLong(true)
-    val head = kryo.readClassAndObject(input).asInstanceOf[T]
+    val head = kryo.synchronized { kryo.readClassAndObject(input).asInstanceOf[T] }
     new DiskSeq[T](ptr, head, tail, this)
   }
 
@@ -263,7 +273,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
     val toWrite = output.synchronized {
       output.clear
       output.writeLong(tail, true)
-      kryo.writeClassAndObject(output, h)
+      kryo.synchronized { kryo.writeClassAndObject(output, h) }
       output.toBytes
     }
     val ptr = writeBytes(SEQNODE, toWrite)
@@ -275,7 +285,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
       output.clear
       output.writeShort(height, true)
       output.writeLong(pos, true)
-      kryo.writeClassAndObject(output, value)
+      kryo.synchronized { kryo.writeClassAndObject(output, value) }
       output.toBytes
     }
     val ptr = writeBytes(LEAFNODE, toWrite)
@@ -307,14 +317,24 @@ class DiskAllocator(filename : String) extends ByteAllocator with FileStorage {
 }
 
 // Caches the actual objects, not the bytes read
-class CachingDiskAllocator(filename : String, cachedItems : Int)
+// null filename means allocate a temporary name and remove it on close
+class CachingDiskAllocator(cachedItems : Int, filename : String = null)
   extends ByteAllocator with AsyncWriterStorage {
 
   protected val cache = new LRUMap(cachedItems)
-  override val file = new RandomAccessFile(filename,"rw")
+  private val realFileName = Option(filename).getOrElse(java.util.UUID.randomUUID.toString)
+  override val file = new RandomAccessFile(realFileName,"rw")
 
   // initialize the file, start the write thread
   this.init
+
+  override def close {
+    super.close
+    // Delete the file if we need to:
+    if (filename == null) {
+      (new java.io.File(realFileName)).delete
+    }
+  }
 
   override def finalize { close }
 
