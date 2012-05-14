@@ -12,24 +12,25 @@ import org.objenesis.strategy.StdInstantiatorStrategy;
 import scala.annotation.tailrec
 import scala.collection.mutable.{HashMap => MHash}
 import scala.collection.immutable.LinearSeq
+import scala.collection.immutable.{List => sciList}
 import scala.actors.Actor
 import scala.actors.Actor._
 
 import org.apache.commons.collections.LRUMap
 
 // Using the collection builder stuff, I bet you can do this correctly for anything with a builder
-class ScalaListSerializer[T] extends KSerializer[List[T]] {
-  override def write(k : Kryo, out : KOutput, obj : List[T]) {
+class ScalasciListSerializer[T] extends KSerializer[sciList[T]] {
+  override def write(k : Kryo, out : KOutput, obj : sciList[T]) {
     out.writeInt(obj.size, true)
     obj.foreach { item =>
       k.writeClassAndObject(out, item)
     }
   }
 
-  override def create(k : Kryo, in : KInput, ltype : Class[List[T]]) : List[T] = {
+  override def create(k : Kryo, in : KInput, ltype : Class[sciList[T]]) : sciList[T] = {
     val sz = in.readInt(true)
-    (0 until sz).foldLeft(List[T]()) { (oldList, idx) =>
-      k.readClassAndObject(in).asInstanceOf[T] :: oldList
+    (0 until sz).foldLeft(sciList[T]()) { (oldsciList, idx) =>
+      k.readClassAndObject(in).asInstanceOf[T] :: oldsciList
     }.reverse // reverse the stack to get the original order
   }
 }
@@ -168,7 +169,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   val kryo = new Kryo
   // Accept everything for now:
   kryo.setRegistrationRequired(false)
-  kryo.addDefaultSerializer(classOf[List[AnyRef]], new ScalaListSerializer[AnyRef])
+  kryo.addDefaultSerializer(classOf[sciList[AnyRef]], new ScalasciListSerializer[AnyRef])
   // Put in some singletons:
   kryo.register(this.getClass, new SingletonSerializer(this))
   kryo.register(None.getClass, new SingletonSerializer(None))
@@ -193,7 +194,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
       // This is ugly, but this method is not type safe anyway
       case LEAFNODE => readLeaf[AnyRef](ptr, buf)
       case PTRNODE => readPtrNode[AnyRef](ptr, buf)
-      case SEQNODE => readSeqNode[AnyRef](ptr, buf)
+      case SEQNODE => readList[AnyRef](ptr, buf)
       case _ => error("Unrecognized node type: " + objType)
     }
   }
@@ -224,7 +225,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
     new DiskPtrNode[T](ptr, treeSize, height, blk, this)
   }
 
-  protected def readSeqNode[T](ptr : Long, buf : Array[Byte]) : DiskSeq[T] = {
+  protected def readList[T](ptr : Long, buf : Array[Byte]) : DiskSeq[T] = {
     val input = new KInput(buf)
     // These bool parameters mean optimize for positive sizes:
     val tail = input.readLong(true)
@@ -249,17 +250,17 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
     }
   }
 
-  override def ptrOf[T](seq : SeqNode[T,Long]) = {
+  override def ptrOf[T](seq : List[T,Long]) = {
     seq.asInstanceOf[DiskSeq[T]].ptr
   }
 
   protected lazy val NIL = allocSeq[AnyRef](null, nullPtr)
-  override def nil[T] : SeqNode[T,Long] = NIL.asInstanceOf[SeqNode[T,Long]]
+  override def nil[T] : List[T,Long] = NIL.asInstanceOf[List[T,Long]]
 
   // If we want to cache or do some other post processing
   protected def afterAlloc[Col](ptr : Long, obj : Col) : Col = obj
 
-  override def allocSeq[T](h : T, tail : Long) : SeqNode[T,Long] = {
+  override def allocSeq[T](h : T, tail : Long) : List[T,Long] = {
     val toWrite = output.synchronized {
       output.clear
       output.writeLong(tail, true)
@@ -348,4 +349,4 @@ class DiskPtrNode[T](val ptr : Long, sz : Long, height : Short, ptrs : Block[Lon
   mem : Allocator[Long]) extends PtrNode[T,Long](sz, height, ptrs, mem)
 
 class DiskSeq[T](val ptr : Long, h : T, t : Long, mem : Allocator[Long])
-  extends SeqNode[T,Long](h, t, mem)
+  extends List[T,Long](h, t, mem)

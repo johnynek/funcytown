@@ -1,5 +1,7 @@
 package com.twitter.funcytown
 
+import scala.collection.immutable.{List => sciList}
+
 import scala.annotation.tailrec
 
 object HashMap {
@@ -9,11 +11,11 @@ object HashMap {
     }
   }
   def empty[K,V](implicit mem : Allocator[_]) : HashMap[K,V] = {
-    new HashMap(0, Block.BITMASK, mem.empty[List[(Long,K,V)]](0), mem)
+    new HashMap(0, Block.BITMASK, mem.empty[sciList[(Long,K,V)]](0), mem)
   }
 }
 
-class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[List[(Long,K,V)],_],
+class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[sciList[(Long,K,V)],_],
   val mem : Allocator[_]) extends Map[K,V] {
 
   def rehash[V1 >: V](newbitmask : Long, newMem : Allocator[_]) : HashMap[K,V1] = {
@@ -35,7 +37,7 @@ class HashMap[K,+V](val longSize : Long, bitmask : Long, node : Node[List[(Long,
 
   override def +[V1 >: V](kv : (K,V1)) : HashMap[K,V1] = {
     // Since the list is of any reference type, the cast below is safe:
-    val castNode = node.asInstanceOf[Node[List[(Long,K,V1)],_]]
+    val castNode = node.asInstanceOf[Node[sciList[(Long,K,V1)],_]]
     val hash = longHash(kv._1)
     val entryTup = (hash, kv._1, kv._2)
     val oldValNewNode = castNode.map(entryTup._1) { x =>
