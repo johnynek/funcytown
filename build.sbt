@@ -1,5 +1,3 @@
-import AssemblyKeys._
-
 name := "funcytown"
 
 version := "0.0.1"
@@ -17,10 +15,3 @@ libraryDependencies += "com.twitter" % "kryo" % "2.04"
 libraryDependencies += "org.apache.directory.studio" % "org.apache.commons.collections" % "3.2.1"
 
 parallelExecution in Test := false
-
-seq(assemblySettings: _*)
-
-// Janino includes a broken signature, and is not needed:
-// excludedJars in assembly <<= (fullClasspath in assembly) map { cp =>
-//  cp filter {_.data.getName == "janino-2.5.16.jar"}
-//}

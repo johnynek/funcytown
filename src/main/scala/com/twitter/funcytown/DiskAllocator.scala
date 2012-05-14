@@ -17,12 +17,6 @@ import scala.actors.Actor._
 
 import org.apache.commons.collections.LRUMap
 
-object DiskAllocator {
-  def newHash[K,V](filename : String, tups : (K,V)*) = {
-    HashNode.apply(tups : _*)(new DiskAllocator(filename))
-  }
-}
-
 // Using the collection builder stuff, I bet you can do this correctly for anything with a builder
 class ScalaListSerializer[T] extends KSerializer[List[T]] {
   override def write(k : Kryo, out : KOutput, obj : List[T]) {
@@ -61,6 +55,10 @@ trait FileStorage extends ByteStorage {
   // Where to seek before each write, only changed inside the file lock
   private val eofPtrLock = new Object
   private var eofPtr = 0L
+  def close {
+    file.synchronized { file.close }
+  }
+
   def init {
     // We have to init to avoid writing something in the "null" offset of 0:
     file.writeInt(0x5ca1ab1e)
@@ -108,12 +106,14 @@ trait FileStorage extends ByteStorage {
 
 trait AsyncWriterStorage extends FileStorage {
   case class WriteRecord(pos : Long, objType : Byte, data : Array[Byte])
+  case object Stop
 
   protected val writingActor = new Actor {
     def act() {
       loop {
         react {
           case WriteRecord(pos,objType,data) => writeAt(pos, objType, data)
+          case Stop => { close; exit }
         }
       }
     }
@@ -123,6 +123,8 @@ trait AsyncWriterStorage extends FileStorage {
     super.init
     writingActor.start
   }
+
+  def stop { writingActor ! Stop }
 
   override def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
     val ptr = getPointer(objType, toWrite)
@@ -300,6 +302,8 @@ class DiskAllocator(filename : String) extends ByteAllocator with FileStorage {
   override val file = new RandomAccessFile(filename,"rw")
   // initialize the file:
   this.init
+
+  override def finalize = close
 }
 
 // Caches the actual objects, not the bytes read
@@ -311,6 +315,8 @@ class CachingDiskAllocator(filename : String, cachedItems : Int)
 
   // initialize the file, start the write thread
   this.init
+
+  override def finalize { close }
 
   override def deref(ptr : Long) : AnyRef = {
     val boxedPtr = ptr.asInstanceOf[AnyRef]
