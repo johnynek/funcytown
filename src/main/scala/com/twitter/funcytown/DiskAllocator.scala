@@ -372,11 +372,49 @@ class CachingDiskAllocator(cachedItems : Int, filename : String = null)
   }
 }
 
+/*
+ * Anything implementing this trait is both immutable and part of an
+ * acyclic graph, so when finding the reachable set, we don't have to worry
+ * about that set changing in time
+ */
+trait ImmutableDagNode[PtrT] {
+  def pointers : Set[PtrT]
+
+  // Allows a node with data to recurse on that data
+  // Be careful: if you mix nodes of different ptr types,
+  // due to type erasure of the PtrT, this method is not safe.
+  def pointersOf[T](t : T) : Set[PtrT] = {
+    if(t.isInstanceOf[ImmutableDagNode[PtrT]]) {
+      //We recurse:
+      t.asInstanceOf[ImmutableDagNode[PtrT]].pointers
+    }
+    else {
+      Set[PtrT]()
+    }
+  }
+}
+
 class DiskLeaf[T](val ptr : Long, hs : Short, ps : Long, v : T, m : Allocator[Long]) extends
-  Leaf[T,Long](hs, ps, v, m)
+  Leaf[T,Long](hs, ps, v, m) with ImmutableDagNode[Long] {
+  override lazy val pointers = pointersOf(v)
+}
 
 class DiskPtrNode[T](val ptr : Long, height : Short, ptrs : Block[Long],
-  mem : Allocator[Long]) extends PtrNode[T,Long](height, ptrs, mem)
+  mem : Allocator[Long]) extends PtrNode[T,Long](height, ptrs, mem) with ImmutableDagNode[Long] {
+  override lazy val pointers = ptrs.foldLeft(Set[Long]()) { (set, ptr) =>
+    if (ptr != mem.nullPtr) {
+      set + ptr
+    }
+    else {
+      set
+    }
+  }
+}
 
 class DiskSeq[T](val ptr : Long, h : T, t : Long, mem : Allocator[Long])
-  extends List[T,Long](h, t, mem)
+  extends List[T,Long](h, t, mem) with ImmutableDagNode[Long] {
+  override lazy val pointers = {
+    val ptrs = pointersOf(h)
+    if (t != mem.nullPtr) { ptrs + t } else { ptrs }
+  }
+}
