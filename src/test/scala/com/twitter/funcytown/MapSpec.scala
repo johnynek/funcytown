@@ -5,9 +5,10 @@ import java.util.Random
 
 class MapSpec extends Specification {
   noDetailedDiffs()
-  // Cache the last 5 objects, so we have to hit disk sometimes
-  implicit val alloc = new CachingDiskAllocator(50)
-  val ITERS = 10000 // Should be much larger than 100
+  // Cache the last N objects, so we have to hit disk sometimes
+  //implicit val alloc = new CachingDiskAllocator(50)
+  implicit val alloc = new GCDiskAllocator(1000)
+  val ITERS = 100000 // Should be much larger than 100
 
   "A funcytown.HashMap" should {
     "look like immutable.HashMap" in {

@@ -14,6 +14,7 @@ import scala.collection.immutable.LinearSeq
 import scala.collection.immutable.{List => sciList}
 import scala.actors.Actor
 import scala.actors.Actor._
+import scala.annotation.tailrec
 
 import org.apache.commons.collections.LRUMap
 
@@ -67,6 +68,8 @@ trait FileStorage extends ByteStorage {
   // Where to seek before each write, only changed inside the file lock
   private val eofPtrLock = new Object
   private var eofPtr = 0L
+  protected val minPtr = 4 //we write a magic int in the header
+
   def close {
     file.synchronized { file.close }
   }
@@ -77,8 +80,21 @@ trait FileStorage extends ByteStorage {
     eofPtr = file.getFilePointer
   }
 
+  @tailrec
+  protected final def retryOnEOF[T]( fn : => T ) : T = {
+    val res = try { Some(fn) }
+    catch {
+      case x: java.io.EOFException => {
+        //This happens if the write hasn't happened by the time we need it
+        Thread.sleep(50) //Sleep 50 ms and try again:
+        None
+      }
+    }
+    if (res.isDefined) res.get else retryOnEOF(fn)
+  }
+
   def readBytes(ptr : Long) : (Byte, Array[Byte]) = {
-    try {
+    retryOnEOF {
       file.synchronized {
         file.seek(ptr)
         val objType = file.readByte
@@ -88,23 +104,27 @@ trait FileStorage extends ByteStorage {
         (objType, buf)
       }
     }
-    catch {
-      case x: java.io.EOFException => {
-        //This happens if the node falls out of cache before it is actually read
-        Thread.sleep(1) //Sleep 1 ms and try again:
-        readBytes(ptr)
+  }
+
+  def sizeOf(ptr : Long) : Int = {
+    retryOnEOF {
+      file.synchronized {
+        file.seek(ptr + 1) // Skip the object header
+        // header + size + data
+        1 + 4 + file.readInt
       }
     }
   }
 
-
+  @inline
+  protected def sizeOf(objType : Byte, toWrite : Array[Byte]) = (1 + 4 + toWrite.size)
   // This finds a pointer without blocking on the file lock
   // in principle, this allows a separate thread to handle writing
   protected def getPointer(objType : Byte, toWrite : Array[Byte]) : Long = {
     eofPtrLock.synchronized {
       val thisPtr = eofPtr
       // update the pointer:
-      eofPtr = thisPtr + (1 + 4 + toWrite.size)
+      eofPtr = thisPtr + sizeOf(objType, toWrite)
       thisPtr
     }
   }
@@ -129,12 +149,18 @@ trait AsyncWriterStorage extends FileStorage {
   case class WriteRecord(pos : Long, objType : Byte, data : Array[Byte])
   case object Stop
 
+  private val writeCache = new MHash[Long, (Byte, Array[Byte])]()
+
   protected val writingActor = new Actor {
 
     def act() {
       loop {
         react {
-          case WriteRecord(pos,objType,data) => writeAt(pos, objType, data)
+          case WriteRecord(pos,objType,data) => {
+            writeAt(pos, objType, data)
+            // Now we have written, remove from the cache:
+            writeCache.synchronized { writeCache -= pos }
+          }
           case Stop => { close; exit }
         }
       }
@@ -147,9 +173,20 @@ trait AsyncWriterStorage extends FileStorage {
   }
 
   def stop { writingActor ! Stop }
-
+  override def sizeOf(ptr : Long) : Int = {
+    writeCache.synchronized { writeCache.get(ptr) }
+      .map { _._2.size + 1 }
+      .getOrElse { super.sizeOf(ptr) }
+  }
+  // There is a race if we don't cache the data until it is written
+  override def readBytes(ptr : Long) : (Byte, Array[Byte]) = {
+    writeCache.synchronized { writeCache.get(ptr) }
+      .getOrElse { super.readBytes(ptr) }
+  }
   override def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
     val ptr = getPointer(objType, toWrite)
+    // TODO multiple writes to the same ptr could cause a failure, need to do a refcount approach
+    writeCache.synchronized { writeCache += (ptr -> (objType, toWrite)) }
     writingActor ! WriteRecord(ptr, objType, toWrite)
     ptr
   }
@@ -278,9 +315,6 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   protected lazy val NIL = allocSeq[AnyRef](null, nullPtr)
   override def nil[T] : List[T,Long] = NIL.asInstanceOf[List[T,Long]]
 
-  // If we want to cache or do some other post processing
-  protected def afterAlloc[Col](ptr : Long, obj : Col) : Col = obj
-
   override def allocSeq[T](h : T, tail : Long) : List[T,Long] = {
     val toWrite = output.synchronized {
       output.clear
@@ -328,26 +362,9 @@ class DiskAllocator(filename : String) extends ByteAllocator with FileStorage {
 }
 
 // Caches the actual objects, not the bytes read
-// null filename means allocate a temporary name and remove it on close
-class CachingDiskAllocator(cachedItems : Int, filename : String = null)
-  extends ByteAllocator with AsyncWriterStorage {
+abstract class CachingByteAllocatorBase(cachedItems : Int) extends ByteAllocator {
 
   protected val cache = new LRUMap(cachedItems)
-  private val realFileName = Option(filename).getOrElse(java.util.UUID.randomUUID.toString)
-  override val file = new RandomAccessFile(realFileName,"rw")
-
-  // initialize the file, start the write thread
-  this.init
-
-  override def close {
-    super.close
-    // Delete the file if we need to:
-    if (filename == null) {
-      (new java.io.File(realFileName)).delete
-    }
-  }
-
-  override def finalize { close }
 
   override def deref(ptr : Long) : AnyRef = {
     val boxedPtr = ptr.asInstanceOf[AnyRef]
@@ -368,9 +385,59 @@ class CachingDiskAllocator(cachedItems : Int, filename : String = null)
     val boxedPtr = ptr.asInstanceOf[AnyRef]
     // Make sure the allocation is in the read cache, since writing is async
     cache.synchronized { cache.put(boxedPtr, obj) }
+    // We are the first sublass under ByteAllocator, so we are done with the afterAlloc chain:
     obj
   }
 }
+
+class CachingDiskAllocator(cachedItems : Int, filename : String = null)
+  extends CachingByteAllocatorBase(cachedItems) with AsyncWriterStorage {
+
+  // TODO check file.deleteOnExit() to make sure this gets cleaned up
+  private val realFileName = Option(filename).getOrElse(java.util.UUID.randomUUID.toString)
+  override val file = new RandomAccessFile(realFileName,"rw")
+
+  // initialize the file, start the write thread
+  this.init
+
+  override def finalize { close }
+
+  override def close {
+    super.close
+    // Delete the file if we need to:
+    if (filename == null) {
+      (new java.io.File(realFileName)).delete
+    }
+  }
+}
+
+class GCDiskAllocator(cachedItems : Int, filename : String = null)
+  extends CachingByteAllocatorBase(cachedItems) with GCFileStorage {
+
+  override val gcIntervalBytes = 1L << 20 // 1 MiB
+  // TODO check file.deleteOnExit() to make sure this gets cleaned up
+  private val realFileName = Option(filename).getOrElse(java.util.UUID.randomUUID.toString)
+  override val file = new RandomAccessFile(realFileName,"rw")
+  // initialize the file, start the write thread
+  this.init
+
+  override def afterAlloc[T](ptr : Long, obj : T) : T = {
+    // When we alloc we pin, when we free, we unpin
+    addToPinned(ptr)
+    super.afterAlloc(ptr, obj)
+  }
+
+  override def finalize { close }
+
+  override def close {
+    super.close
+    // Delete the file if we need to:
+    if (filename == null) {
+      (new java.io.File(realFileName)).delete
+    }
+  }
+}
+
 
 /*
  * Anything implementing this trait is both immutable and part of an
@@ -397,6 +464,7 @@ trait ImmutableDagNode[PtrT] {
 class DiskLeaf[T](val ptr : Long, hs : Short, ps : Long, v : T, m : Allocator[Long]) extends
   Leaf[T,Long](hs, ps, v, m) with ImmutableDagNode[Long] {
   override lazy val pointers = pointersOf(v)
+  override def finalize { m.free(ptr) }
 }
 
 class DiskPtrNode[T](val ptr : Long, height : Short, ptrs : Block[Long],
@@ -409,6 +477,7 @@ class DiskPtrNode[T](val ptr : Long, height : Short, ptrs : Block[Long],
       set
     }
   }
+  override def finalize { mem.free(ptr) }
 }
 
 class DiskSeq[T](val ptr : Long, h : T, t : Long, mem : Allocator[Long])
@@ -417,4 +486,5 @@ class DiskSeq[T](val ptr : Long, h : T, t : Long, mem : Allocator[Long])
     val ptrs = pointersOf(h)
     if (t != mem.nullPtr) { ptrs + t } else { ptrs }
   }
+  override def finalize { mem.free(ptr) }
 }
