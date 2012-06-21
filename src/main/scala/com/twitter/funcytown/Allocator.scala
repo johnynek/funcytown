@@ -2,7 +2,7 @@ package com.twitter.funcytown
 
 trait Allocator[@specialized(Long) PtrT] {
   val nullPtr : PtrT
-  def deref(ptr : PtrT) : AnyRef
+  def deref[T](ptr : PtrT) : T
   def ptrOf[T](node : Node[T,PtrT]) : PtrT
   def ptrOf[T](sn : List[T,PtrT]) : PtrT
   def empty[T](height : Short): PtrNode[T,PtrT]

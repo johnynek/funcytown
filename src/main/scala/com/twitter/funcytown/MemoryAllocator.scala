@@ -2,7 +2,7 @@ package com.twitter.funcytown
 
 class MemoryAllocator(implicit mf : Manifest[AnyRef]) extends Allocator[AnyRef] {
   override val nullPtr : AnyRef = null
-  override def deref(ptr : AnyRef) = ptr
+  override def deref[T](ptr : AnyRef) = ptr.asInstanceOf[T]
   override def empty[T](height : Short) : PtrNode[T,AnyRef] = {
     allocPtrNode(height, Block.alloc[AnyRef])
   }

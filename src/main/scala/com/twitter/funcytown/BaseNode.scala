@@ -23,7 +23,7 @@ class PtrNode[T, PtrT](val height : Short, val ptrs : Block[PtrT],
   mem : Allocator[PtrT])(implicit mf : Manifest[PtrT]) extends Node[T,PtrT] {
   override def isEmpty : Boolean = {
     ptrs.foldLeft(true) { (empty, ptr) =>
-      empty && ((ptr == mem.nullPtr) || mem.deref(ptr).asInstanceOf[Node[T,PtrT]].isEmpty)
+      empty && ((ptr == mem.nullPtr) || mem.deref[Node[T,PtrT]](ptr).isEmpty)
     }
   }
   override def findLeaf(pos : Long) : Option[Leaf[T,PtrT]] = {
@@ -31,7 +31,7 @@ class PtrNode[T, PtrT](val height : Short, val ptrs : Block[PtrT],
     val nextPtr = ptrs(thisIdx)
     if (mem.nullPtr != nextPtr) {
       // nextPtr has height strictly greater
-      val nextNode = mem.deref(nextPtr).asInstanceOf[Node[T,PtrT]]
+      val nextNode = mem.deref[Node[T,PtrT]](nextPtr)
       nextNode.findLeaf(nextPos)
     }
     else {
@@ -55,7 +55,7 @@ class PtrNode[T, PtrT](val height : Short, val ptrs : Block[PtrT],
     }
     else {
       // nextPtr has height strictly greater
-      val nextNode = mem.deref(nextPtr).asInstanceOf[Node[T,PtrT]]
+      val nextNode = mem.deref[Node[T,PtrT]](nextPtr)
       // Replace down the tree:
       val (old, resNode) = nextNode.map(nextPos)(fn)
       // If it is empty, we don't need to store, it, just put null
@@ -69,7 +69,7 @@ class PtrNode[T, PtrT](val height : Short, val ptrs : Block[PtrT],
     // Just get the children streams out in order:
     ptrs.foldLeft(Stream.empty[T]) { (oldStream, newPtr) =>
       if (newPtr != mem.nullPtr) {
-        oldStream ++ (mem.deref(newPtr).asInstanceOf[Node[T,PtrT]].toStream)
+        oldStream ++ (mem.deref[Node[T,PtrT]](newPtr).toStream)
       }
       else {
         oldStream

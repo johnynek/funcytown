@@ -244,18 +244,19 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   val SEQNODE = 3 : Byte
 
   override val nullPtr : Long = 0L
-  override def deref(ptr : Long) = {
+  override def deref[T](ptr : Long) = {
     if (ptr == 0L) {
       error("Trying to deref 0")
     }
     val (objType, buf) = readBytes(ptr)
-    objType match {
+    val obj = objType match {
       // This is ugly, but this method is not type safe anyway
       case LEAFNODE => readLeaf[AnyRef](ptr, buf)
       case PTRNODE => readPtrNode[AnyRef](ptr, buf)
       case SEQNODE => readList[AnyRef](ptr, buf)
       case _ => error("Unrecognized node type: " + objType)
     }
+    obj.asInstanceOf[T]
   }
 
   protected def readLeaf[T](ptr : Long, buf : Array[Byte]) : DiskLeaf[T] = {
@@ -366,7 +367,7 @@ abstract class CachingByteAllocatorBase(cachedItems : Int) extends ByteAllocator
 
   protected val cache = new LRUMap(cachedItems)
 
-  override def deref(ptr : Long) : AnyRef = {
+  override def deref[T](ptr : Long) = {
     val boxedPtr = ptr.asInstanceOf[AnyRef]
     val cached = cache.synchronized { cache.get(boxedPtr) }
     if (cached == null) {
@@ -378,7 +379,7 @@ abstract class CachingByteAllocatorBase(cachedItems : Int) extends ByteAllocator
     else {
       // return the cached value:
       cached
-    }
+    }.asInstanceOf[T]
   }
 
   override def afterAlloc[T](ptr : Long, obj : T) : T = {

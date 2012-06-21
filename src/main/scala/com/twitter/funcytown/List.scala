@@ -85,7 +85,7 @@ class List[+T,PtrT](h : T, t : PtrT, val alloc : Allocator[PtrT]) extends Linear
     foldLeft(alloc.nil[T]) { (list, item) => item :: list }
   }
 
-  override def tail = alloc.deref(t).asInstanceOf[List[T,PtrT]]
+  override def tail = alloc.deref[List[T,PtrT]](t)
   override def toStream : Stream[T] = {
     if (isEmpty) {
       Stream.empty
