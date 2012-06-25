@@ -8,6 +8,7 @@ import scala.collection.immutable.{List => sciList}
  * At each position it holds a pointer to some object.
  */
 abstract class Node[PtrT] {
+  def allocator : Allocator[PtrT]
   def apply(pos : Long) = get(pos).get
   def get(pos : Long) : Option[PtrT] = findLeaf(pos).map { _.valuePtr }
   def isEmpty : Boolean
@@ -27,6 +28,7 @@ abstract class Node[PtrT] {
 
 class PtrNode[PtrT](val height : Short, val ptrs : Block[PtrT],
   mem : Allocator[PtrT])(implicit mf : Manifest[PtrT]) extends Node[PtrT] {
+  override def allocator = mem
   override def isEmpty : Boolean = {
     ptrs.foldLeft(true) { (empty, ptr) =>
       empty && ((ptr == mem.nullPtr) || mem.deref[Node[PtrT]](ptr).isEmpty)
@@ -90,6 +92,7 @@ class PtrNode[PtrT](val height : Short, val ptrs : Block[PtrT],
 class Leaf[PtrT](val height : Short, val pos : Long, val valuePtr : PtrT, mem : Allocator[PtrT])
   (implicit mf : Manifest[PtrT])
   extends Node[PtrT] {
+  override def allocator = mem
   override def isEmpty = false
   override def findLeaf(inpos : Long) = {
     if (pos == inpos) {

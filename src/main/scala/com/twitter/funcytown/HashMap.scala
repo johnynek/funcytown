@@ -4,14 +4,14 @@ import scala.collection.immutable.{List => sciList}
 import scala.annotation.tailrec
 
 object HashMap {
-  def apply[K,V,PtrT](tups : Tuple2[K,V]*)(implicit mem : Allocator[PtrT]) : HashMap[K,V,PtrT] = {
-    tups.foldLeft(empty[K,V,PtrT](mem)) { (old, tupE) =>
+  def apply[K,V](tups : Tuple2[K,V]*)(implicit mem : Allocator[_]) : HashMap[K,V,_] = {
+    tups.foldLeft(empty[K,V](mem)) { (old, tupE) =>
       old + tupE
     }
   }
-  def empty[K,V,PtrT](implicit mem : Allocator[PtrT]) : HashMap[K,V,PtrT] = {
-    //new HashMap(0, Block.BITMASK, mem.empty[sciList[HashEntry[K,V]]](0), mem)
-    new HashMap(0, Block.bitmaskOf((64 / Block.SHIFT) * Block.SHIFT - 1), mem.empty(0), mem)
+  def empty[K,V](implicit mem : Allocator[_]) : HashMap[K,V,_] = {
+    // Make the biggest bitmask we can fit in a 64 bit hash
+    new HashMap(0, Block.bitmaskOf((64 / Block.SHIFT) * Block.SHIFT - 1), mem.empty(0))
   }
 }
 
@@ -25,15 +25,16 @@ class HashEntry[K,+V](val hash : Long, val key : K, val value : V) {
   lazy val keyValue : (K,V) = (key, value)
 }
 
-class HashMap[K,+V, PtrT](val longSize : Long, bitmask : Long, node : Node[PtrT],
-  val mem : Allocator[PtrT]) extends Map[K,V] {
+class HashMap[K,+V, PtrT](val longSize : Long, bitmask : Long, node : Node[PtrT]) extends Map[K,V] {
+
+  protected def mem = node.allocator
 
   def rehash[V1 >: V](newbitmask : Long, newMem : Allocator[PtrT]) : HashMap[K,V1,PtrT] = {
     if ( newbitmask == bitmask ) {
       this
     }
     else {
-      val base = new HashMap[K,V1,PtrT](0L, newbitmask, newMem.empty(0), newMem)
+      val base = new HashMap[K,V1,PtrT](0L, newbitmask, newMem.empty(0))
       foldLeft(base) { (old, kv) => old + kv }
     }
   }
@@ -80,7 +81,7 @@ class HashMap[K,+V, PtrT](val longSize : Long, bitmask : Long, node : Node[PtrT]
     }
     val newNode = oldValNewNode._2
     // TODO verify we don't need to rehash due to the sparsity of the Node data structure
-    new HashMap[K,V1,PtrT](longSize + sizeDelta, bitmask, newNode, mem)
+    new HashMap[K,V1,PtrT](longSize + sizeDelta, bitmask, newNode)
   }
 
   override def -(key : K) : HashMap[K,V,PtrT] = {
@@ -120,7 +121,7 @@ class HashMap[K,+V, PtrT](val longSize : Long, bitmask : Long, node : Node[PtrT]
     }
     val newNode = oldValNewNode._2
     // TODO verify we don't need to rehash due to the sparsity of the Node data structure
-    new HashMap[K,V,PtrT](longSize + sizeDelta, bitmask, newNode, mem)
+    new HashMap[K,V,PtrT](longSize + sizeDelta, bitmask, newNode)
   }
 
   override def get(key : K) : Option[V] = {
