@@ -318,8 +318,8 @@ trait GCFileStorage extends AsyncWriterStorage with Allocator[Long] {
     }
   }
 
-  // TODO unit test this
-  case class MemorySearch(val thisMax : Long) extends GraphSearch[ContiguousRegion, UnallocatedSpace] {
+  case class MemorySearch(val thisMax : Long) extends
+    GraphSearch[ContiguousRegion, UnallocatedSpace] {
     val empty = UnallocatedSpace.range(minPtr, thisMax)
     def visit(node : ContiguousRegion, visited : UnallocatedSpace) = visited - node
     def haveVisited(node : ContiguousRegion, visited : UnallocatedSpace) = {
@@ -343,5 +343,32 @@ trait GCFileStorage extends AsyncWriterStorage with Allocator[Long] {
       case Run => gc
       case Stop => exit
     } } }
+  }
+}
+
+class GCDiskAllocator(cachedItems : Int, filename : String = null)
+  extends CachingByteAllocatorBase(cachedItems) with GCFileStorage {
+
+  override val gcIntervalBytes = 1L << 20 // 1 MiB
+  // TODO check file.deleteOnExit() to make sure this gets cleaned up
+  private val realFileName = Option(filename).getOrElse(java.util.UUID.randomUUID.toString)
+  override val file = new RandomAccessFile(realFileName,"rw")
+  // initialize the file, start the write thread
+  this.init
+
+  override def afterAlloc[T](ptr : Long, obj : T) : T = {
+    // When we alloc we pin, when we free, we unpin
+    addToPinned(ptr)
+    super.afterAlloc(ptr, obj)
+  }
+
+  override def finalize { close }
+
+  override def close {
+    super.close
+    // Delete the file if we need to:
+    if (filename == null) {
+      (new java.io.File(realFileName)).delete
+    }
   }
 }

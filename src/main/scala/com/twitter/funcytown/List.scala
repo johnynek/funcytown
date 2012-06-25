@@ -15,38 +15,63 @@ object List {
   def concat[T, U >: T, PtrT](iter : Iterable[U], seq : List[T,PtrT]) : List[U,PtrT] = {
     // This is safe because of the type constraint
     val sequ : List[U,PtrT] = seq
-    // We reverse as we put in:
-    iter.foldRight(sequ) { (newv, old) => newv :: old }
+    sequ.asList(iter).map { List.concatList(_, sequ) }
+      .getOrElse {
+        // We reverse as we put in:
+        iter.foldRight(sequ) { (newv, old) => newv :: old }
+      }
+  }
+  // If you know both are lists, this is the best one to call
+  def concatList[T, PtrT](left : List[T,PtrT], right : List[T,PtrT]) : List[T,PtrT] = {
+    //Use the alloc for the right:
+    val alloc = right.alloc
+    left.foldRightPtr(right) { (newPtr, oldList) =>
+      alloc.allocCons[T](newPtr, alloc.ptrOf(oldList))
+    }
   }
 }
 
 /** Allocator agnostic immutable linked list
  */
-class List[+T,PtrT](h : T, t : PtrT, val alloc : Allocator[PtrT]) extends LinearSeq[T] {
+class List[+T,PtrT](val h : PtrT, val t : PtrT, val alloc : Allocator[PtrT]) extends LinearSeq[T] {
   // This is the cons operator:
   def debugStr : String = "(" + h + ", " + t + ")"
-  def ::[U >: T](x: U) : List[U,PtrT] = alloc.allocSeq(x, alloc.ptrOf(this))
+  def ::[U >: T](x: U) : List[U,PtrT] = {
+    alloc.allocCons[U](alloc.allocObj(x), alloc.ptrOf(this))
+  }
 
-  def :::[U >: T](iter : Iterable[U]) : List[U,PtrT] = List.concat(iter, this)
+  def :::[U >: T](iter : Iterable[U]) : List[U,PtrT] = {
+    List.concat(iter, this)
+  }
 
   def ++[U >: T](iter : Iterable[U]) : List[U,PtrT] = {
-    val seqiter : List[U,PtrT] = if (iter.isInstanceOf[List[U,_]] &&
+    val iterL = asList(iter)
+      .getOrElse { List.from(iter)(alloc).asInstanceOf[List[U,PtrT]] }
+    List.concatList(this, iterL)
+  }
+
+  def asList[U](iter : Iterable[U]) : Option[List[U,PtrT]] = {
+    if (iter.isInstanceOf[List[U,_]] &&
       (iter.asInstanceOf[List[U,PtrT]].alloc == alloc)) {
-      // No need to convert:
-      iter.asInstanceOf[List[U,PtrT]]
+      Some(iter.asInstanceOf[List[U,PtrT]])
     }
     else {
-      List.from(iter)(alloc).asInstanceOf[List[U,PtrT]]
+      None
     }
-    List.concat(this, seqiter)
   }
 
   override def foldRight[U](init : U)(foldfn : (T,U) => U) : U = {
     reverse.foldLeft(init) { (prev, item) => foldfn(item, prev) }
   }
+  def foldRightPtr[U](init : U)(foldfn : (PtrT,U) => U) : U = {
+    reverse.foldLeftPtr(init) { (prev, item) => foldfn(item, prev) }
+  }
 
   override def foldLeft[U](init : U)(foldfn : (U,T) => U) : U = {
     toStream.foldLeft(init)(foldfn)
+  }
+  def foldLeftPtr[U](init : U)(foldfn : (U, PtrT) => U) : U = {
+    toPtrStream.foldLeft(init)(foldfn)
   }
 
   def longLength : Long = {
@@ -72,26 +97,36 @@ class List[+T,PtrT](h : T, t : PtrT, val alloc : Allocator[PtrT]) extends Linear
       error("List is empty, but get(" + idx + ") was called")
     }
     if (idx == 0) {
-      h
+      head
     }
     else {
       tail.get(idx - 1L)
     }
   }
   override def isEmpty = (t == alloc.nullPtr)
-  override def head = h
+  override lazy val head = alloc.derefObj[T](h)
   override def iterator : Iterator[T] = toStream.iterator
   override lazy val reverse : List[T,PtrT] = {
-    foldLeft(alloc.nil[T]) { (list, item) => item :: list }
+    foldLeftPtr(alloc.nil[T]) { (tail, ptr) =>
+      alloc.allocCons[T](ptr, alloc.ptrOf(tail))
+    }
   }
 
-  override def tail = alloc.deref[List[T,PtrT]](t)
+  override lazy val tail = alloc.deref[List[T,PtrT]](t)
+  def toPtrStream : Stream[PtrT] = {
+    if (isEmpty) {
+      Stream.empty
+    }
+    else {
+      Stream.cons(h, tail.toPtrStream)
+    }
+  }
   override def toStream : Stream[T] = {
     if (isEmpty) {
       Stream.empty
     }
     else {
-      Stream.cons(h, tail.toStream)
+      Stream.cons(head, tail.toStream)
     }
   }
 }

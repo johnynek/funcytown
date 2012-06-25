@@ -25,6 +25,15 @@ object Block {
     val nextPos = pos & bitmaskOf(SHIFT * nextBlocks)
     (thisPos, nextPos)
   }
+
+  def fromSparse[N](sparse : Map[Int,N], sval : N)(implicit mf : Manifest[N]) : Block[N] = {
+    val array = mf.newArray(BITMASK + 1)
+    //just go through and update:
+    (0 to BITMASK).foreach { idx =>
+      array(idx) = sparse.getOrElse(idx, sval)
+    }
+    new Block[N](BITMASK, array)
+  }
 }
 
 sealed class Block[@specialized(Int,Long) N](bitmask : Int, ary : Array[N]) {
@@ -40,6 +49,16 @@ sealed class Block[@specialized(Int,Long) N](bitmask : Int, ary : Array[N]) {
       val newAry = ary.clone
       newAry(toIdx(idx)) = value
       new Block[N](bitmask, newAry)
+    }
+  }
+  def toSparse(sparseVal : N) : Map[Int, N] = {
+    ary.zipWithIndex.foldLeft(Map[Int,N]()) { (oldMap, valIdx) =>
+      if( valIdx._1 != sparseVal ) {
+        oldMap + (valIdx._2 -> valIdx._1)
+      }
+      else {
+        oldMap
+      }
     }
   }
   def foldLeft[M](init : M)(foldfn : (M,N) => M) : M = ary.foldLeft(init)(foldfn)

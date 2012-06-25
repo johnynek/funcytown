@@ -7,8 +7,8 @@ class MapSpec extends Specification {
   noDetailedDiffs()
   // Cache the last N objects, so we have to hit disk sometimes
   //implicit val alloc = new CachingDiskAllocator(50)
-  //implicit val alloc = new GCDiskAllocator(1000)
-  implicit val alloc = new MemoryAllocator
+  implicit val alloc = new GCDiskAllocator(5000)
+  //implicit val alloc = new MemoryAllocator
   val ITERS = 100000 // Should be much larger than 100
 
   "A funcytown.HashMap" should {
@@ -16,8 +16,8 @@ class MapSpec extends Specification {
       try {
       // Be sure to use the right object:
       val r = new Random
-      var hashmap = com.twitter.funcytown.HashMap[Int,Int]()
-      var smap = scala.collection.immutable.HashMap[Int,Int]()
+      var hashmap = com.twitter.funcytown.HashMap(0 -> 0)
+      var smap = scala.collection.immutable.HashMap(0 -> 0)
       hashmap.size must be_==(smap.size)
       (1 to ITERS).foreach { iter =>
         val key = r.nextInt % (ITERS/100) // Repeat some keys

@@ -18,43 +18,6 @@ import scala.annotation.tailrec
 
 import org.apache.commons.collections.LRUMap
 
-// Using the collection builder stuff, I bet you can do this correctly for anything with a builder
-class ScalasciListSerializer[T] extends KSerializer[sciList[T]] {
-  override def write(k : Kryo, out : KOutput, obj : sciList[T]) {
-    out.writeInt(obj.size, true)
-    obj.foreach { item =>
-      k.writeClassAndObject(out, item)
-    }
-  }
-
-  override def create(k : Kryo, in : KInput, ltype : Class[sciList[T]]) : sciList[T] = {
-    val sz = in.readInt(true)
-    (0 until sz).foldLeft(sciList[T]()) { (oldsciList, idx) =>
-      k.readClassAndObject(in).asInstanceOf[T] :: oldsciList
-    }.reverse // reverse the stack to get the original order
-  }
-}
-
-class HashEntrySerializer[K,V](hashfn : K => Long) extends KSerializer[HashEntry[K,V]] {
-  override def write(k : Kryo, out : KOutput, obj : HashEntry[K,V]) {
-    k.writeClassAndObject(out, obj.key.asInstanceOf[AnyRef])
-    k.writeClassAndObject(out, obj.value.asInstanceOf[AnyRef])
-  }
-  override def create(k : Kryo, in : KInput, clazz : Class[HashEntry[K,V]]) : HashEntry[K,V] = {
-    val key = k.readClassAndObject(in).asInstanceOf[K]
-    val value = k.readClassAndObject(in).asInstanceOf[V]
-    new HashEntry(hashfn(key), key, value)
-  }
-}
-
-class SingletonSerializer[T](inst : T) extends KSerializer[T] {
-  override def write(k : Kryo, out : KOutput, obj : T) {
-    assert(inst == obj, "Singleton serializer only works for one instance")
-    // Do nothing
-  }
-  override def create(k : Kryo, in : KInput, stype : Class[T]) : T = inst
-}
-
 trait ByteStorage {
   // read the data at pos and return the header byte, and the header byte, and bytearray
   def readBytes(pos : Long) : (Byte, Array[Byte])
@@ -159,7 +122,16 @@ trait AsyncWriterStorage extends FileStorage {
           case WriteRecord(pos,objType,data) => {
             writeAt(pos, objType, data)
             // Now we have written, remove from the cache:
-            writeCache.synchronized { writeCache -= pos }
+            writeCache.synchronized {
+              writeCache.get(pos).map { objTypeBytes =>
+                if(objTypeBytes == (objType,data)) {
+                  // This is the record we just wrote:
+                  writeCache -= pos
+                }
+                // else, another write overwrote this position, we'll clean
+                // when we actually write that data
+              }
+            }
           }
           case Stop => { close; exit }
         }
@@ -185,7 +157,6 @@ trait AsyncWriterStorage extends FileStorage {
   }
   override def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
     val ptr = getPointer(objType, toWrite)
-    // TODO multiple writes to the same ptr could cause a failure, need to do a refcount approach
     writeCache.synchronized { writeCache += (ptr -> (objType, toWrite)) }
     writingActor ! WriteRecord(ptr, objType, toWrite)
     ptr
@@ -224,24 +195,33 @@ trait ByteCachingStorage extends AsyncWriterStorage {
 
 abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
 
-  val kryo = new Kryo
-  // Accept everything for now:
-  kryo.setRegistrationRequired(false)
-  kryo.addDefaultSerializer(classOf[sciList[AnyRef]], new ScalasciListSerializer[AnyRef])
-  // Put in some singletons:
-  kryo.register(this.getClass, new SingletonSerializer(this))
-  kryo.register(None.getClass, new SingletonSerializer(None))
-  kryo.register(Nil.getClass, new SingletonSerializer(Nil))
-  kryo.register(classOf[HashEntry[AnyRef,AnyRef]], new HashEntrySerializer[AnyRef,AnyRef](_.hashCode.toLong))
-  // Use objensis for better support of scala objects:
-  kryo.setInstantiatorStrategy(new StdInstantiatorStrategy());
+  val kryo = { val k = new Kryo
+    // Accept everything for now:
+    k.setRegistrationRequired(false)
+    k.addDefaultSerializer(classOf[sciList[AnyRef]], new ScalasciListSerializer[AnyRef])
+    // Put in some singletons:
+    k.register(this.getClass, new SingletonSerializer(this))
+    k.register(None.getClass, new SingletonSerializer(None))
+    k.register(Nil.getClass, new SingletonSerializer(Nil))
+    k.register(classOf[HashEntry[AnyRef,AnyRef]],
+      new HashEntrySerializer[AnyRef,AnyRef](_.hashCode.toLong))
+    // Use our byte-storage to just serialize the pointers, and call deref on deserialize
+    k.register(classOf[ObjNode[AnyRef]], new IdnSerializer[ObjNode[AnyRef]](this))
+    k.register(classOf[DiskLeaf], new IdnSerializer[DiskLeaf](this))
+    k.register(classOf[DiskPtrNode], new IdnSerializer[DiskPtrNode](this))
+    k.register(classOf[DiskSeq[AnyRef]], new IdnSerializer[DiskSeq[AnyRef]](this))
+    // Use objensis for better support of scala objects:
+    k.setInstantiatorStrategy(new StdInstantiatorStrategy());
+    k
+  }
 
   private val output = new KOutput(4096, 1 << 20)
-  private val emptyPtrNodes = MHash[Short, DiskPtrNode[_]]()
+  private val emptyPtrNodes = MHash[Short, DiskPtrNode]()
 
   val LEAFNODE = 1 : Byte
   val PTRNODE = 2 : Byte
   val SEQNODE = 3 : Byte
+  val OBJNODE = 4 : Byte
 
   override val nullPtr : Long = 0L
   override def deref[T](ptr : Long) = {
@@ -251,60 +231,78 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
     val (objType, buf) = readBytes(ptr)
     val obj = objType match {
       // This is ugly, but this method is not type safe anyway
-      case LEAFNODE => readLeaf[AnyRef](ptr, buf)
-      case PTRNODE => readPtrNode[AnyRef](ptr, buf)
+      case LEAFNODE => readLeaf(ptr, buf)
+      case PTRNODE => readPtrNode(ptr, buf)
       case SEQNODE => readList[AnyRef](ptr, buf)
+      case OBJNODE => readObj[AnyRef](ptr, buf)
       case _ => error("Unrecognized node type: " + objType)
     }
     obj.asInstanceOf[T]
   }
 
-  protected def readLeaf[T](ptr : Long, buf : Array[Byte]) : DiskLeaf[T] = {
+  override def derefObj[T](ptr : Long) : T = deref[ObjNode[T]](ptr).obj
+
+  protected def readLeaf(ptr : Long, buf : Array[Byte]) : DiskLeaf = {
     val input = new KInput(buf)
     // These bool parameters mean optimize for positive sizes:
     val height = input.readShort(true)
     val pos = input.readLong(true)
-    val obj = kryo.synchronized { kryo.readClassAndObject(input).asInstanceOf[T] }
-    new DiskLeaf[T](ptr, height, pos, obj, this)
+    val valPtr = input.readLong(true)
+    new DiskLeaf(ptr, height, pos, valPtr, this)
   }
 
-  protected def readPtrNode[T](ptr : Long, buf : Array[Byte]) : DiskPtrNode[T] = {
+  protected def readPtrNode(ptr : Long, buf : Array[Byte]) : DiskPtrNode = {
     val input = new KInput(buf)
     // These bool parameters mean optimize for positive sizes:
     val height = input.readShort(true)
     // Read the array:
-    val blockAry = new Array[Long](Block.BITMASK + 1)
-    // I know this is not hip, but it is fast:
-    var idx = 0
-    while( idx < (Block.BITMASK + 1)) {
-      blockAry(idx) = input.readLong(true)
-      idx = idx + 1
-    }
-    val blk = new Block[Long](Block.BITMASK, blockAry)
-    new DiskPtrNode[T](ptr, height, blk, this)
+    val sparsity = input.readInt
+    // If sparsity is -1, that means we are not sparse:
+    val blk = if( sparsity != -1 ) {
+      Block.fromSparse[Long](
+        (0 until sparsity).foldLeft(Map[Int,Long]()) { (map, idx) =>
+          val key = input.readInt(true)
+          val value = input.readLong(true)
+          map + (key -> value)
+        }, 0L)
+      }
+      else {
+        // Dense representation:
+        val blockAry = new Array[Long](Block.BITMASK + 1)
+        (0 to Block.BITMASK).foreach { idx =>
+          blockAry(idx) = input.readLong(true)
+        }
+        new Block[Long](Block.BITMASK, blockAry)
+      }
+    new DiskPtrNode(ptr, height, blk, this)
   }
 
   protected def readList[T](ptr : Long, buf : Array[Byte]) : DiskSeq[T] = {
     val input = new KInput(buf)
     // These bool parameters mean optimize for positive sizes:
+    val objptr = input.readLong(true)
     val tail = input.readLong(true)
-    val head = kryo.synchronized { kryo.readClassAndObject(input).asInstanceOf[T] }
-    new DiskSeq[T](ptr, head, tail, this)
+    new DiskSeq[T](ptr, objptr, tail, this)
   }
 
-  override def empty[T](height : Short) : PtrNode[T,Long] = {
+  protected def readObj[T](ptr : Long, buf : Array[Byte]) : ObjNode[T] = {
+    val input = new KInput(buf)
+    val head = kryo.synchronized { kryo.readClassAndObject(input).asInstanceOf[T] }
+    new ObjNode[T](ptr, head, this)
+  }
+
+  override def empty(height : Short) : PtrNode[Long] = {
     emptyPtrNodes.synchronized {
       emptyPtrNodes.getOrElseUpdate(height,
         allocPtrNode(height, Block.alloc[Long])
       )
-      .asInstanceOf[PtrNode[T,Long]]
     }
   }
 
-  override def ptrOf[T](node : Node[T,Long]) = {
+  override def ptrOf(node : Node[Long]) = {
     node match {
-      case leaf : DiskLeaf[_] => leaf.ptr
-      case ptrNode : DiskPtrNode[_] => ptrNode.ptr
+      case leaf : DiskLeaf => leaf.ptr
+      case ptrNode : DiskPtrNode => ptrNode.ptr
       case _ => error("Invalid node")
     }
   }
@@ -313,44 +311,70 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
     seq.asInstanceOf[DiskSeq[T]].ptr
   }
 
-  protected lazy val NIL = allocSeq[AnyRef](null, nullPtr)
+  protected lazy val NIL = allocCons(nullPtr, nullPtr)
   override def nil[T] : List[T,Long] = NIL.asInstanceOf[List[T,Long]]
 
-  override def allocSeq[T](h : T, tail : Long) : List[T,Long] = {
+  override def allocObj[T](obj : T) : Long = {
     val toWrite = output.synchronized {
       output.clear
+      kryo.synchronized { kryo.writeClassAndObject(output, obj) }
+      output.toBytes
+    }
+    val ptr = writeBytes(OBJNODE, toWrite)
+    // Add to the cache or pinned set
+    afterAlloc(ptr, new ObjNode[T](ptr, obj, this))
+    ptr
+  }
+
+  override def allocCons[T](h : Long, tail : Long) : List[T,Long] = {
+    val toWrite = output.synchronized {
+      output.clear
+      output.writeLong(h, true)
       output.writeLong(tail, true)
-      kryo.synchronized { kryo.writeClassAndObject(output, h) }
       output.toBytes
     }
     val ptr = writeBytes(SEQNODE, toWrite)
     afterAlloc(ptr, new DiskSeq[T](ptr, h, tail, this))
   }
 
-  override def allocLeaf[T](height : Short, pos : Long, value : T) = {
+  override def allocLeaf(height : Short, pos : Long, value : Long) = {
     val toWrite = output.synchronized {
       output.clear
       output.writeShort(height, true)
       output.writeLong(pos, true)
-      kryo.synchronized { kryo.writeClassAndObject(output, value) }
+      output.writeLong(value, true)
       output.toBytes
     }
     val ptr = writeBytes(LEAFNODE, toWrite)
-    afterAlloc(ptr, new DiskLeaf[T](ptr, height, pos, value, this))
+    afterAlloc(ptr, new DiskLeaf(ptr, height, pos, value, this))
   }
 
-  override def allocPtrNode[T](height : Short, ptrs : Block[Long]) = {
+  override def allocPtrNode(height : Short, ptrs : Block[Long]) = {
     val toWrite = output.synchronized {
       output.clear
       output.writeShort(height, true)
-      ptrs.foldLeft(output) { (oldOut, thisVal) =>
-        oldOut.writeLong(thisVal, true)
-        oldOut
+      val sparse = ptrs.toSparse(0L)
+      if (sparse.size < (Block.BITMASK / 2)) {
+        // Use the sparse representation:
+        output.writeInt(sparse.size)
+        sparse.foreach { (kv) =>
+          output.writeInt(kv._1, true)
+          output.writeLong(kv._2, true)
+        }
+      }
+      else {
+        // Signal that we are dense:
+        output.writeInt(-1)
+        // Use the fold as a loop:
+        ptrs.foldLeft(output) { (out, thisVal) =>
+          out.writeLong(thisVal, true)
+          out
+        }
       }
       output.toBytes
     }
     val ptr = writeBytes(PTRNODE, toWrite)
-    afterAlloc(ptr, new DiskPtrNode[T](ptr, height, ptrs, this))
+    afterAlloc(ptr, new DiskPtrNode(ptr, height, ptrs, this))
   }
 }
 
@@ -372,7 +396,7 @@ abstract class CachingByteAllocatorBase(cachedItems : Int) extends ByteAllocator
     val cached = cache.synchronized { cache.get(boxedPtr) }
     if (cached == null) {
       //We need to actually read off disk:
-      val toCache = super.deref(ptr)
+      val toCache = super.deref[T](ptr)
       cache.synchronized { cache.put(boxedPtr, toCache) }
       toCache
     }
@@ -412,64 +436,23 @@ class CachingDiskAllocator(cachedItems : Int, filename : String = null)
   }
 }
 
-class GCDiskAllocator(cachedItems : Int, filename : String = null)
-  extends CachingByteAllocatorBase(cachedItems) with GCFileStorage {
-
-  override val gcIntervalBytes = 1L << 20 // 1 MiB
-  // TODO check file.deleteOnExit() to make sure this gets cleaned up
-  private val realFileName = Option(filename).getOrElse(java.util.UUID.randomUUID.toString)
-  override val file = new RandomAccessFile(realFileName,"rw")
-  // initialize the file, start the write thread
-  this.init
-
-  override def afterAlloc[T](ptr : Long, obj : T) : T = {
-    // When we alloc we pin, when we free, we unpin
-    addToPinned(ptr)
-    super.afterAlloc(ptr, obj)
-  }
-
-  override def finalize { close }
-
-  override def close {
-    super.close
-    // Delete the file if we need to:
-    if (filename == null) {
-      (new java.io.File(realFileName)).delete
-    }
-  }
+class ObjNode[T](val ptr : Long, val obj : T, override val mem : Allocator[Long]) extends ImmutableDagNode[Long] {
+  override def selfPtr = ptr
+  override lazy val pointers = pointersOf(obj)
+  override def finalize { mem.free(ptr) }
 }
 
-
-/*
- * Anything implementing this trait is both immutable and part of an
- * acyclic graph, so when finding the reachable set, we don't have to worry
- * about that set changing in time
- */
-trait ImmutableDagNode[PtrT] {
-  def pointers : Set[PtrT]
-
-  // Allows a node with data to recurse on that data
-  // Be careful: if you mix nodes of different ptr types,
-  // due to type erasure of the PtrT, this method is not safe.
-  def pointersOf[T](t : T) : Set[PtrT] = {
-    if(t.isInstanceOf[ImmutableDagNode[PtrT]]) {
-      //We recurse:
-      t.asInstanceOf[ImmutableDagNode[PtrT]].pointers
-    }
-    else {
-      Set[PtrT]()
-    }
-  }
+class DiskLeaf(val ptr : Long, hs : Short, ps : Long, valuePtr : Long, override val mem : Allocator[Long]) extends
+  Leaf[Long](hs, ps, valuePtr, mem) with ImmutableDagNode[Long] {
+  override def selfPtr = ptr
+  override lazy val pointers = Set(valuePtr).filter { _ != mem.nullPtr }
+  override def finalize { mem.free(ptr) }
 }
 
-class DiskLeaf[T](val ptr : Long, hs : Short, ps : Long, v : T, m : Allocator[Long]) extends
-  Leaf[T,Long](hs, ps, v, m) with ImmutableDagNode[Long] {
-  override lazy val pointers = pointersOf(v)
-  override def finalize { m.free(ptr) }
-}
-
-class DiskPtrNode[T](val ptr : Long, height : Short, ptrs : Block[Long],
-  mem : Allocator[Long]) extends PtrNode[T,Long](height, ptrs, mem) with ImmutableDagNode[Long] {
+class DiskPtrNode(val ptr : Long, height : Short, ptrs : Block[Long],
+  override val mem : Allocator[Long])
+  extends PtrNode[Long](height, ptrs, mem) with ImmutableDagNode[Long] {
+  override def selfPtr = ptr
   override lazy val pointers = ptrs.foldLeft(Set[Long]()) { (set, ptr) =>
     if (ptr != mem.nullPtr) {
       set + ptr
@@ -481,11 +464,9 @@ class DiskPtrNode[T](val ptr : Long, height : Short, ptrs : Block[Long],
   override def finalize { mem.free(ptr) }
 }
 
-class DiskSeq[T](val ptr : Long, h : T, t : Long, mem : Allocator[Long])
+class DiskSeq[T](val ptr : Long, h : Long, t : Long, override val mem : Allocator[Long])
   extends List[T,Long](h, t, mem) with ImmutableDagNode[Long] {
-  override lazy val pointers = {
-    val ptrs = pointersOf(h)
-    if (t != mem.nullPtr) { ptrs + t } else { ptrs }
-  }
+  override def selfPtr = ptr
+  override lazy val pointers = Set(h,t).filter { _ != mem.nullPtr }
   override def finalize { mem.free(ptr) }
 }
