@@ -60,6 +60,47 @@ class List[+T,PtrT](val h : PtrT, val t : PtrT, val alloc : Allocator[PtrT]) ext
     }
   }
 
+  override def filter(p : (T) => Boolean) : List[T,PtrT] = {
+    @tailrec
+    def getLastTrue(trueList : List[T,PtrT], check : List[T,PtrT]) : List[T,PtrT] = {
+      if(check.isEmpty) {
+        trueList
+      }
+      else if(p(check.head)) {
+        //we are still true:
+        getLastTrue(trueList, check.tail)
+      }
+      else {
+        //Reset at our tail:
+        getLastTrue(check.tail, check.tail)
+      }
+    }
+    val trueSuffix = getLastTrue(this, this)
+    // push into the stack until we reach the suffix:
+    @tailrec
+    def buildStack(stack : List[T,PtrT], thisPos : List[T,PtrT]) : List[T,PtrT] = {
+      if(thisPos.t == trueSuffix.t) {
+        // then we have filled the stack
+        stack
+      }
+      else if(p(thisPos.head)) {
+        // Push into the stack:
+        val newStack = alloc.allocCons(thisPos.h, alloc.ptrOf(stack))
+        buildStack(newStack, thisPos.tail)
+      }
+      else {
+        //Just skip this one:
+        buildStack(stack, thisPos.tail)
+      }
+    }
+    val filteredStack = buildStack(alloc.nil[T], this)
+    //Just pop off the stack:
+    filteredStack.foldLeftPtr(trueSuffix) { (oldList, ptr) =>
+      alloc.allocCons(ptr, alloc.ptrOf(oldList))
+    }
+  }
+  override def filterNot( p : (T) => Boolean) = filter { !p(_) }
+
   override def foldRight[U](init : U)(foldfn : (T,U) => U) : U = {
     reverse.foldLeft(init) { (prev, item) => foldfn(item, prev) }
   }
@@ -72,6 +113,16 @@ class List[+T,PtrT](val h : PtrT, val t : PtrT, val alloc : Allocator[PtrT]) ext
   }
   def foldLeftPtr[U](init : U)(foldfn : (U, PtrT) => U) : U = {
     toPtrStream.foldLeft(init)(foldfn)
+  }
+
+  override lazy val last = {
+    assert(!isEmpty, "last called on an empty funcytown.List")
+    @tailrec
+    def lastOf(list : List[T,PtrT]) : T = {
+      if(list.tail.isEmpty) { list.head }
+      else { lastOf(list.tail) }
+    }
+    lastOf(this)
   }
 
   def longLength : Long = {
@@ -89,6 +140,8 @@ class List[+T,PtrT](val h : PtrT, val t : PtrT, val alloc : Allocator[PtrT]) ext
     val len = longLength
     if (len <= Int.MaxValue) len.toInt else error("Length: " + len + " can't fit in Int")
   }
+
+  override def size = length
 
   override def apply(idx : Int) : T = get(idx)
   @tailrec

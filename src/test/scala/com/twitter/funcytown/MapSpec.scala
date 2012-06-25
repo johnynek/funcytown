@@ -9,7 +9,7 @@ class MapSpec extends Specification {
   //implicit val alloc = new CachingDiskAllocator(50)
   implicit val alloc = new GCDiskAllocator(5000)
   //implicit val alloc = new MemoryAllocator
-  val ITERS = 100000 // Should be much larger than 100
+  val ITERS = 10000 // Should be much larger than 100
 
   "A funcytown.HashMap" should {
     "look like immutable.HashMap" in {
