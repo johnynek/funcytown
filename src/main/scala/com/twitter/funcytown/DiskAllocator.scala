@@ -1,7 +1,5 @@
 package com.twitter.funcytown
 
-import java.io.RandomAccessFile
-
 import com.esotericsoftware.kryo.io.{Input => KInput}
 import com.esotericsoftware.kryo.io.{Output => KOutput}
 import com.esotericsoftware.kryo.Kryo
@@ -26,21 +24,17 @@ trait ByteStorage {
 }
 
 trait FileStorage extends ByteStorage {
+  // Start out 1L, because 0L is used for null
+  // This is used by the GC
+  protected val minPtr = 1L
+  private val eofPtr = new SyncVar[Long](minPtr)
+  protected val file : SyncVar[FileLike]
 
-  val file : RandomAccessFile
-  // Where to seek before each write, only changed inside the file lock
-  private val eofPtrLock = new Object
-  private var eofPtr = 0L
-  protected val minPtr = 4 //we write a magic int in the header
-
-  def close {
-    file.synchronized { file.close }
-  }
+  def close { file.mutate { _.close } }
 
   def init {
-    // We have to init to avoid writing something in the "null" offset of 0:
-    file.writeInt(0x5ca1ab1e)
-    eofPtr = file.getFilePointer
+    // Make sure 0L is never allocated:
+    file.mutate { _.writeByte(0.toByte) }
   }
 
   @tailrec
@@ -58,23 +52,22 @@ trait FileStorage extends ByteStorage {
 
   def readBytes(ptr : Long) : (Byte, Array[Byte]) = {
     retryOnEOF {
-      file.synchronized {
-        file.seek(ptr)
-        val objType = file.readByte
-        val len = file.readInt
+      file.effect { f =>
+        val (objType, fl1) = f.seek(ptr).readByte
+        val (len, f2) = fl1.readInt
         val buf = new Array[Byte](len)
-        file.readFully(buf)
-        (objType, buf)
+        // Now update the file
+        (f2.readFully(buf), (objType, buf))
       }
     }
   }
 
   def sizeOf(ptr : Long) : Int = {
     retryOnEOF {
-      file.synchronized {
-        file.seek(ptr + 1) // Skip the object header
+      file.effect { f =>
+        val dataSizeFl = f.seek(ptr + 1).readInt // Skip the object header
         // header + size + data
-        1 + 4 + file.readInt
+        (dataSizeFl._2, 1 + 4 + dataSizeFl._1)
       }
     }
   }
@@ -84,20 +77,18 @@ trait FileStorage extends ByteStorage {
   // This finds a pointer without blocking on the file lock
   // in principle, this allows a separate thread to handle writing
   protected def getPointer(objType : Byte, toWrite : Array[Byte]) : Long = {
-    eofPtrLock.synchronized {
-      val thisPtr = eofPtr
-      // update the pointer:
-      eofPtr = thisPtr + sizeOf(objType, toWrite)
-      thisPtr
+    eofPtr.effect { eof =>
+      // update the pointer, and read it out
+      (eof + sizeOf(objType, toWrite), eof)
     }
   }
 
   def writeAt(pos : Long, objType : Byte, toWrite : Array[Byte]) {
-    file.synchronized {
-      file.seek(pos)
-      file.writeByte(objType)
-      file.writeInt(toWrite.length)
-      file.write(toWrite)
+    file.mutate { fl : FileLike =>
+      fl.seek(pos)
+        .writeByte(objType)
+        .writeInt(toWrite.length)
+        .writeFully(toWrite)
     }
   }
 
@@ -378,8 +369,10 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   }
 }
 
-class DiskAllocator(filename : String) extends ByteAllocator with FileStorage {
-  override val file = new RandomAccessFile(filename,"rw")
+class DiskAllocator(filename : String, spillSize : Int)
+  extends ByteAllocator with FileStorage {
+  override val file = new SyncVar[FileLike](FileLikeSeq(MemoryFileLike(spillSize),
+    RandAccessFileLike(filename)))
   // initialize the file:
   this.init
 
@@ -415,12 +408,14 @@ abstract class CachingByteAllocatorBase(cachedItems : Int) extends ByteAllocator
   }
 }
 
-class CachingDiskAllocator(cachedItems : Int, filename : String = null)
+// Keep 10MB in memory before going to disk by default
+class CachingDiskAllocator(cachedItems : Int, spillSize : Int = 10000000, filename : String = null)
   extends CachingByteAllocatorBase(cachedItems) with AsyncWriterStorage {
 
   // TODO check file.deleteOnExit() to make sure this gets cleaned up
   private val realFileName = Option(filename).getOrElse(java.util.UUID.randomUUID.toString)
-  override val file = new RandomAccessFile(realFileName,"rw")
+  override val file = new SyncVar[FileLike](FileLikeSeq(MemoryFileLike(spillSize),
+    RandAccessFileLike(realFileName)))
 
   // initialize the file, start the write thread
   this.init

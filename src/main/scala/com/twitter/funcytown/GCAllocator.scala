@@ -346,14 +346,14 @@ trait GCFileStorage extends AsyncWriterStorage with Allocator[Long] {
   }
 }
 
-class GCDiskAllocator(cachedItems : Int, filename : String = null)
+class GCDiskAllocator(cachedItems : Int, spillSize : Int = 10000000, filename : String = null)
   extends CachingByteAllocatorBase(cachedItems) with GCFileStorage {
 
   override val gcIntervalBytes = 1L << 20 // 1 MiB
   // TODO check file.deleteOnExit() to make sure this gets cleaned up
   private val realFileName = Option(filename).getOrElse(java.util.UUID.randomUUID.toString)
-  override val file = new RandomAccessFile(realFileName,"rw")
   // initialize the file, start the write thread
+  override val file = new SyncVar[FileLike](FileLikeSeq(MemoryFileLike(spillSize), RandAccessFileLike(realFileName)))
   this.init
 
   override def afterAlloc[T](ptr : Long, obj : T) : T = {
