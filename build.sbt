@@ -6,11 +6,9 @@ organization := "com.twitter"
 
 scalaVersion := "2.8.1"
 
-resolvers += "Concurrent Maven Repo" at "http://conjars.org/repo"
-
 libraryDependencies += "org.scala-tools.testing" % "specs_2.8.1" % "1.6.6" % "test"
 
-libraryDependencies += "com.twitter" % "kryo" % "2.04"
+libraryDependencies += "com.esotericsoftware.kryo" % "kryo" % "2.16"
 
 libraryDependencies += "org.apache.directory.studio" % "org.apache.commons.collections" % "3.2.1"
 

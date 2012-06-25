@@ -236,7 +236,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   protected def readLeaf(ptr : Long, buf : Array[Byte]) : DiskLeaf = {
     val input = new KInput(buf)
     // These bool parameters mean optimize for positive sizes:
-    val height = input.readShort(true)
+    val height = input.readShort
     val pos = input.readLong(true)
     val valPtr = input.readLong(true)
     new DiskLeaf(ptr, height, pos, valPtr, this)
@@ -245,7 +245,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   protected def readPtrNode(ptr : Long, buf : Array[Byte]) : DiskPtrNode = {
     val input = new KInput(buf)
     // These bool parameters mean optimize for positive sizes:
-    val height = input.readShort(true)
+    val height = input.readShort
     // Read the array:
     val sparsity = input.readInt
     // If sparsity is -1, that means we are not sparse:
@@ -331,7 +331,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   override def allocLeaf(height : Short, pos : Long, value : Long) = {
     val toWrite = output.synchronized {
       output.clear
-      output.writeShort(height, true)
+      output.writeShort(height)
       output.writeLong(pos, true)
       output.writeLong(value, true)
       output.toBytes
@@ -343,7 +343,7 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   override def allocPtrNode(height : Short, ptrs : Block[Long]) = {
     val toWrite = output.synchronized {
       output.clear
-      output.writeShort(height, true)
+      output.writeShort(height)
       val sparse = ptrs.toSparse(0L)
       if (sparse.size < (Block.BITMASK / 2)) {
         // Use the sparse representation:
