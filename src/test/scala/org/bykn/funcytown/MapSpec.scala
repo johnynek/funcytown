@@ -1,4 +1,4 @@
-package com.twitter.funcytown
+package org.bykn.funcytown
 
 import org.specs._
 import java.util.Random
@@ -16,7 +16,7 @@ class MapSpec extends Specification {
       try {
       // Be sure to use the right object:
       val r = new Random
-      var hashmap = com.twitter.funcytown.HashMap(0 -> 0)
+      var hashmap = org.bykn.funcytown.HashMap(0 -> 0)
       var smap = scala.collection.immutable.HashMap(0 -> 0)
       hashmap.size must be_==(smap.size)
       (1 to ITERS).foreach { iter =>

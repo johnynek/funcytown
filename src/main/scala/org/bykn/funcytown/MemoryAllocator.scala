@@ -1,4 +1,4 @@
-package com.twitter.funcytown
+package org.bykn.funcytown
 
 class MemoryAllocator(implicit mf : Manifest[AnyRef]) extends Allocator[AnyRef] {
   override val nullPtr : AnyRef = null

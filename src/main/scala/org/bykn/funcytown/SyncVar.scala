@@ -1,7 +1,7 @@
-package com.twitter.funcytown
+package org.bykn.funcytown
 
-class SyncVar[@specialized(Int,Long) T](init : T) {
-  private val lock = new Object
+class SyncVar[T](init : T) {
+  private val lock : AnyRef = new Object
   private var value = init
   // fn is called exactly once inside a private lock. the result is returned
   def mutate[U <: T](fn : (T) => U) : U = {

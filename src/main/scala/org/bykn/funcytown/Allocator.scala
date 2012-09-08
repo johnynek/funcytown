@@ -1,4 +1,4 @@
-package com.twitter.funcytown
+package org.bykn.funcytown
 
 trait Allocator[@specialized(Long) PtrT] {
   val nullPtr : PtrT

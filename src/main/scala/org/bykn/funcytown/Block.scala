@@ -1,4 +1,4 @@
-package com.twitter.funcytown
+package org.bykn.funcytown
 
 import scala.annotation.tailrec
 

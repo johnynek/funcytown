@@ -1,4 +1,4 @@
-package com.twitter.funcytown
+package org.bykn.funcytown
 
 import com.esotericsoftware.kryo.io.{Input => KInput}
 import com.esotericsoftware.kryo.io.{Output => KOutput}

@@ -1,4 +1,4 @@
-package com.twitter.funcytown
+package org.bykn.funcytown
 
 import org.specs._
 import java.util.Random
@@ -17,7 +17,7 @@ class ListSpec extends Specification {
       // Be sure to use the right object:
       val r = new Random
       // Make the initial lists:
-      var flist = com.twitter.funcytown.List(0)
+      var flist = org.bykn.funcytown.List(0)
       // Damn type erasure!
       val fclass = flist.getClass.asInstanceOf[AnyRef]
       var ilist = scala.collection.immutable.List(0)

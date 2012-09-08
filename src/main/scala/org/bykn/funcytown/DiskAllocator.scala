@@ -1,4 +1,4 @@
-package com.twitter.funcytown
+package org.bykn.funcytown
 
 import com.esotericsoftware.kryo.io.{Input => KInput}
 import com.esotericsoftware.kryo.io.{Output => KOutput}
@@ -13,8 +13,6 @@ import scala.collection.immutable.{List => sciList}
 import scala.actors.Actor
 import scala.actors.Actor._
 import scala.annotation.tailrec
-
-import org.apache.commons.collections.LRUMap
 
 trait ByteStorage {
   // read the data at pos and return the header byte, and the header byte, and bytearray
@@ -159,26 +157,25 @@ trait ByteCachingStorage extends AsyncWriterStorage {
   // read from the cache, on misses hit file, fill cache
   val cachedItems : Int
 
-  protected val cache = new LRUMap(cachedItems)
+  protected val cache = new LRUMap[Long,(Byte, Array[Byte])](cachedItems)
 
   override def readBytes(ptr : Long) : (Byte, Array[Byte]) = {
-    val boxedPtr = ptr.asInstanceOf[AnyRef]
-    val cached = cache.synchronized { cache.get(boxedPtr) }
+    val cached = cache.synchronized { cache.get(ptr) }
     if (cached == null) {
       //We need to actually read off disk:
       val toCache = super.readBytes(ptr)
-      cache.synchronized { cache.put(boxedPtr, toCache) }
+      cache.synchronized { cache.put(ptr, toCache) }
       toCache
     }
     else {
       // return the cached value:
-      cached.asInstanceOf[(Byte,Array[Byte])]
+      cached
     }
   }
 
   override def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
     val ptr = super.writeBytes(objType, toWrite)
-    cache.synchronized { cache.put(ptr.asInstanceOf[AnyRef], (objType, toWrite)) }
+    cache.synchronized { cache.put(ptr, (objType, toWrite)) }
     ptr
   }
 
@@ -382,15 +379,14 @@ class DiskAllocator(filename : String, spillSize : Int)
 // Caches the actual objects, not the bytes read
 abstract class CachingByteAllocatorBase(cachedItems : Int) extends ByteAllocator {
 
-  protected val cache = new LRUMap(cachedItems)
+  protected val cache = new LRUMap[Long,AnyRef](cachedItems)
 
   override def deref[T](ptr : Long) = {
-    val boxedPtr = ptr.asInstanceOf[AnyRef]
-    val cached = cache.synchronized { cache.get(boxedPtr) }
+    val cached = cache.synchronized { cache.get(ptr) }
     if (cached == null) {
       //We need to actually read off disk:
       val toCache = super.deref[T](ptr)
-      cache.synchronized { cache.put(boxedPtr, toCache) }
+      cache.synchronized { cache.put(ptr, toCache.asInstanceOf[AnyRef]) }
       toCache
     }
     else {
@@ -400,9 +396,8 @@ abstract class CachingByteAllocatorBase(cachedItems : Int) extends ByteAllocator
   }
 
   override def afterAlloc[T](ptr : Long, obj : T) : T = {
-    val boxedPtr = ptr.asInstanceOf[AnyRef]
     // Make sure the allocation is in the read cache, since writing is async
-    cache.synchronized { cache.put(boxedPtr, obj) }
+    cache.synchronized { cache.put(ptr, obj.asInstanceOf[AnyRef]) }
     // We are the first sublass under ByteAllocator, so we are done with the afterAlloc chain:
     obj
   }
