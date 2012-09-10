@@ -7,7 +7,8 @@ class ListSpec extends Specification {
   noDetailedDiffs()
   // Cache the last N objects, so we have to hit disk sometimes
   //implicit val alloc = new CachingDiskAllocator(50)
-  implicit val alloc = new GCDiskAllocator(5000)
+  implicit val alloc = new GCDiskAllocator(1 << 16) //64k
+  //implicit val alloc = new DiskAllocator("test", 1 << 16) // 64k of ram
   //implicit val alloc = new MemoryAllocator
   val ITERS = 100
 

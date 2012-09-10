@@ -41,7 +41,8 @@ trait FileStorage extends ByteStorage {
     catch {
       case x: java.io.EOFException => {
         //This happens if the write hasn't happened by the time we need it
-        Thread.sleep(50) //Sleep 50 ms and try again:
+        Thread.sleep(1) //Sleep 1 ms and try again:
+        println("sleep")
         None
       }
     }
@@ -75,13 +76,14 @@ trait FileStorage extends ByteStorage {
   // This finds a pointer without blocking on the file lock
   // in principle, this allows a separate thread to handle writing
   protected def getPointer(objType : Byte, toWrite : Array[Byte]) : Long = {
-    eofPtr.effect { eof =>
+    eofPtr.effectIdem { eof =>
       // update the pointer, and read it out
       (eof + sizeOf(objType, toWrite), eof)
     }
   }
 
   def writeAt(pos : Long, objType : Byte, toWrite : Array[Byte]) {
+    // We need to hold a lock across this call
     file.mutate { fl : FileLike =>
       fl.seek(pos)
         .writeByte(objType)
@@ -97,29 +99,29 @@ trait FileStorage extends ByteStorage {
   }
 }
 
-trait AsyncWriterStorage extends FileStorage {
-  case class WriteRecord(pos : Long, objType : Byte, data : Array[Byte])
-  case object Stop
+case object Stop
 
-  private val writeCache = new MHash[Long, (Byte, Array[Byte])]()
+trait AsyncWriterStorage extends FileStorage {
+  case class WriteRecord(pos : Long)
+
+  private val writeCache = new SyncVar(Map[Long, (Byte, Array[Byte])]())
 
   protected val writingActor = new Actor {
 
     def act() {
       loop {
         react {
-          case WriteRecord(pos,objType,data) => {
-            writeAt(pos, objType, data)
-            // Now we have written, remove from the cache:
-            writeCache.synchronized {
-              writeCache.get(pos).map { objTypeBytes =>
-                if(objTypeBytes == (objType,data)) {
-                  // This is the record we just wrote:
-                  writeCache -= pos
+          case WriteRecord(pos) => {
+            // This is the record we just wrote:
+            writeCache.mutate { wc =>
+              wc.get(pos)
+                // Make sure what we just wrote is the latest
+                .map { objBytes =>
+                  writeAt(pos, objBytes._1, objBytes._2)
+                  // Now we have written, remove from the cache:
+                  wc - pos
                 }
-                // else, another write overwrote this position, we'll clean
-                // when we actually write that data
-              }
+                .getOrElse(wc)
             }
           }
           case Stop => { close; exit }
@@ -135,19 +137,20 @@ trait AsyncWriterStorage extends FileStorage {
 
   def stop { writingActor ! Stop }
   override def sizeOf(ptr : Long) : Int = {
-    writeCache.synchronized { writeCache.get(ptr) }
+    writeCache.get.get(ptr)
       .map { _._2.size + 1 }
+      // Else we have to read off disk
       .getOrElse { super.sizeOf(ptr) }
   }
   // There is a race if we don't cache the data until it is written
   override def readBytes(ptr : Long) : (Byte, Array[Byte]) = {
-    writeCache.synchronized { writeCache.get(ptr) }
+    writeCache.get.get(ptr)
       .getOrElse { super.readBytes(ptr) }
   }
   override def writeBytes(objType : Byte, toWrite : Array[Byte]) : Long = {
     val ptr = getPointer(objType, toWrite)
-    writeCache.synchronized { writeCache += (ptr -> (objType, toWrite)) }
-    writingActor ! WriteRecord(ptr, objType, toWrite)
+    writeCache.mutate { _ + (ptr -> (objType, toWrite)) }
+    writingActor ! WriteRecord(ptr)
     ptr
   }
 }

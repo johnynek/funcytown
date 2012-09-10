@@ -2,6 +2,7 @@ package org.bykn.funcytown
 
 import java.io.RandomAccessFile
 
+import scala.collection.SeqView
 import scala.collection.immutable.{List => sciList}
 import scala.collection.immutable.{SortedMap, SortedSet, Queue}
 import scala.actors.Actor
@@ -12,14 +13,14 @@ import scala.annotation.tailrec
 /**
  * Represents free space
  */
-abstract class MemoryMap {
+sealed abstract class MemoryMap {
   def size : Long
   def alloc(size : Long) : Option[(Long, MemoryMap)]
 }
 
 case object EmptySpace extends MemoryMap {
-  override def size = 0L
-  override def alloc(size : Long) = None
+  def size = 0L
+  def alloc(size : Long) = None
 }
 
 case class ContiguousRegion(ptr : Long, override val size : Long) extends MemoryMap
@@ -81,14 +82,22 @@ object RegionSet {
   val logBase = 1.5
   val empty = RegionSet(SortedMap[Int, sciList[ContiguousRegion]]())
   def intLog(sz : Long) = (scala.math.log(sz)/scala.math.log(logBase)).toInt + 1
+  def apply(m : MemoryMap) : RegionSet = {
+    m match {
+      case EmptySpace => empty
+      case c : ContiguousRegion => empty + c
+      case r : RegionSet => r
+    }
+  }
 }
 
 case class RegionSet(spaces : SortedMap[Int, sciList[ContiguousRegion]]) extends MemoryMap {
   import RegionSet._
-  protected def +(reg : ContiguousRegion) : RegionSet = {
+  def +(reg : ContiguousRegion) : RegionSet = {
     if (reg.size > 0) {
       val bucket = intLog(reg.size)
-      val newList = reg :: (spaces.getOrElse(bucket, sciList[ContiguousRegion]()))
+      //TODO Prefer lower pointers
+      val newList = (reg :: (spaces.getOrElse(bucket, sciList[ContiguousRegion]())))
       RegionSet(spaces + (bucket -> newList))
     }
     else {
@@ -96,8 +105,12 @@ case class RegionSet(spaces : SortedMap[Int, sciList[ContiguousRegion]]) extends
     }
   }
 
-  override def size : Long = {
+  override lazy val size : Long = {
     spaces.mapValues { _.map { _.size }.sum }.values.sum
+  }
+
+  def regions : Iterator[ContiguousRegion] = {
+    spaces.iterator.flatMap { kv => kv._2.iterator }
   }
 
   protected def -(reg : ContiguousRegion) : RegionSet = {
@@ -139,14 +152,17 @@ case class RegionSet(spaces : SortedMap[Int, sciList[ContiguousRegion]]) extends
 }
 
 object UnallocatedSpace {
+  val empty = new UnallocatedSpace(SortedSet[ContiguousRegion]())
   def range(lowerBound : Long, strictUpperBound : Long) = {
-    val set = SortedSet[ContiguousRegion]()
-    UnallocatedSpace(set + ContiguousRegion(lowerBound, strictUpperBound - lowerBound))
+    empty + ContiguousRegion(lowerBound, strictUpperBound - lowerBound)
   }
   def apply(crs : ContiguousRegion*) = new UnallocatedSpace(SortedSet(crs :_*))
+  def apply(rs : RegionSet) = {
+    rs.regions.foldLeft(empty) { (uas, c) => uas + c }
+  }
 }
 // This class is used to efficiently find the set of allocated space
-case class UnallocatedSpace(space : SortedSet[ContiguousRegion]) {
+case class UnallocatedSpace(val space : SortedSet[ContiguousRegion]) {
   def findRegionContaining(ptr : Long) : Option[ContiguousRegion] = {
     //Create a minimal region with this ptr:
     val minCR = ContiguousRegion(ptr, -1L)
@@ -165,19 +181,28 @@ case class UnallocatedSpace(space : SortedSet[ContiguousRegion]) {
       .map { _.contains(reg) }
       .getOrElse(false)
   }
-
+  //return freed space:
+  def +(free : ContiguousRegion) : UnallocatedSpace = {
+    UnallocatedSpace(space + free)
+  }
   //Remove from the pool
   def -(inuse : ContiguousRegion) : UnallocatedSpace = {
     findRegionContaining(inuse.ptr).map { containing =>
       val remaining = (space - containing)
-      new UnallocatedSpace(
+      // Return any space at the end which is not inuse
+      UnallocatedSpace(
         (containing - inuse).foldLeft(remaining) { (set, freeRegion) => set + freeRegion }
       )
     }.getOrElse(this)
   }
-  def size : Long = space.map { _.size }.sum
+  //Remove all the current items that are present in the other:
+  def -(that : UnallocatedSpace) : UnallocatedSpace = {
+    that.space.foldLeft(this) { (oldspace, reg) => oldspace - reg }
+  }
+
+  lazy val size : Long = space.map { _.size }.sum
   // Convert to RegionSet for efficient allocation
-  def toRegionSet : RegionSet = {
+  lazy val toRegionSet : RegionSet = {
     RegionSet(
       SortedMap(
         space
@@ -214,38 +239,121 @@ abstract class GraphSearch[N,V] {
   }
 }
 
+private[funcytown] abstract class MemorySearch(alloc : Allocator[Long]) extends
+  GraphSearch[Long, UnallocatedSpace] {
+  def visit(node : Long, visited : UnallocatedSpace) = visited - regionOf(node)
+  def haveVisited(node : Long, visited : UnallocatedSpace) = {
+    // We remove the region when we visit
+    visited.findRegionContaining(node).isEmpty
+  }
+  def regionOf(ptr : Long) : ContiguousRegion
+  def neighborsOf(ptr : Long) = {
+    alloc.deref[ImmutableDagNode[Long]](ptr).pointers
+  }
+}
+
+object GCState {
+  def init(alloc : Allocator[Long], memReg : (Long) => ContiguousRegion, minPtr: Long) : GCState = {
+    new GCState(alloc, memReg, minPtr, Set[Long](), EmptySpace, minPtr, minPtr, Set[Long](), None)
+  }
+}
+
+case class GCState(alloc : Allocator[Long],
+  memRegionOf : (Long) => ContiguousRegion,
+  minPtr : Long,
+  pinned : Set[Long],
+  freeSpace : MemoryMap,
+  maxPtr: Long, lastGCPtr : Long,
+  lastPinnedSearch : Set[Long],
+  runningGC : Option[MemorySearch]) {
+
+  // Run if we just freed, and we haven't run in a while
+  protected def timeToRun(gcIntervalBytes : Long) : Boolean = {
+    maxPtr > (lastGCPtr + gcIntervalBytes)
+  }
+
+  protected lazy val calculateFreeSpace : Option[UnallocatedSpace] = {
+    // If it wasn't free before, and it is now, we know that no matter what,
+    // it must still be free (because the allocator wasn't allocating it
+    runningGC.map {
+      val pinnedQ = pinned
+        .foldLeft(Queue[Long]()) { (old, reg) => old.enqueue(reg) }
+      _.breadthFirst(pinnedQ) - UnallocatedSpace(RegionSet(freeSpace))
+    }
+  }
+  lazy val pinnedDiff = pinned diff lastPinnedSearch
+
+  def freedSize : Long = calculateFreeSpace.map { _.size }.getOrElse(0L)
+
+  // This should be running:
+  def finishGC(current : GCState) : GCState = {
+    calculateFreeSpace.map { ua =>
+      val newFreeSpace = ua.space
+        .foldLeft(RegionSet(current.freeSpace)) { (oldf, reg) => oldf + reg }
+      current.copy(freeSpace = newFreeSpace,
+        lastGCPtr = maxPtr,
+        lastPinnedSearch = pinned,
+        runningGC = None)
+
+    }.getOrElse {
+      //println("Freed: 0")
+      current
+    }
+  }
+
+  protected lazy val memSearch = new MemorySearch(alloc) {
+    val empty = UnallocatedSpace.range(minPtr, maxPtr)
+    def regionOf(ptr : Long) = memRegionOf(ptr)
+  }
+
+  def startGC(gcIntervalBytes : Long, minDiffOfPinnedSet : Int) : GCState = {
+    if(runningGC.isDefined) {
+      //We only run one at a time:
+      this
+    }
+    else if(!timeToRun(gcIntervalBytes)) {
+      // Not enough extra space as been allocated
+      this
+    }
+    else if((!lastPinnedSearch.isEmpty) && pinnedDiff.size < minDiffOfPinnedSet) {
+      //Not enough change yet
+      this
+    }
+    else {
+      //Time to run
+      copy(runningGC = Some(memSearch))
+    }
+  }
+}
+
 /*
  * Adds a separate thread to do GC of the files on the disk
  */
 trait GCFileStorage extends AsyncWriterStorage with Allocator[Long] {
-  private val lock = new Object
-  private var pinned = Set[Long]()
-  private var freeSpace : MemoryMap = EmptySpace
+//trait GCFileStorage extends Allocator[Long] with FileStorage {
+  private val gcState = new SyncVar(GCState.init(this, this.regionOf _, minPtr))
 
-  private var maxPtr : Long = minPtr
-  private var lastGCPtr : Long = minPtr
-  private var lastPinnedSearch = Set[Long]()
-  private var runningGC : Option[MemorySearch] = None
   // Everytime the file grows by this much, trigger a GC (on free)
   val gcIntervalBytes : Long
-  val minDiffOfPinnedSet = 100 // How different must the pinned set be before running GC?
+  val minDiffOfPinnedSet = 1000 // How different must the pinned set be before running GC?
 
-  protected def addToPinned(ptr : Long) : Set[Long] = lock.synchronized {
-    pinned = pinned + ptr
-    pinned
+  protected def addToPinned(ptr : Long) : Set[Long] = {
+    gcState.mutateIdem { gcs =>
+      gcs.copy(pinned = gcs.pinned + ptr)
+    }.pinned
   }
 
   // Here we find a space to write into
   override def getPointer(objType : Byte, toWrite : Array[Byte]) : Long = {
-    lock.synchronized {
-      val size = sizeOf(objType, toWrite)
-      freeSpace.alloc(size) match {
-        case Some(ptrMmap) => { freeSpace = ptrMmap._2; ptrMmap._1 }
+    val size = sizeOf(objType, toWrite)
+    gcState.effectIdem { gcs =>
+      gcs.freeSpace.alloc(size) match {
+        case Some(ptrMmap) => {
+          (gcs.copy(freeSpace = ptrMmap._2), ptrMmap._1)
+        }
         case None => {
           //Have to allocate at the end:
-          val ptr = maxPtr
-          maxPtr += size
-          ptr
+          (gcs.copy(maxPtr = (gcs.maxPtr + size)), gcs.maxPtr)
         }
       }
     }
@@ -253,103 +361,35 @@ trait GCFileStorage extends AsyncWriterStorage with Allocator[Long] {
 
   // Release space to be reallocated
   override def free(ptr : Long) {
-    lock.synchronized {
-      pinned = pinned - ptr
-      // Run if we just freed, and we haven't run in a while
-      if (maxPtr > (lastGCPtr + gcIntervalBytes) && (runningGC.isEmpty)) { gcActor ! Run }
-    }
+    gcState.effectIdem { gcs =>
+      val state1 = gcs.copy(pinned = gcs.pinned - ptr)
+      val gc = state1.startGC(gcIntervalBytes, minDiffOfPinnedSet)
+      (gc, if(gc != state1) Some(gc) else None)
+    }.map { gc => gcActor ! gc } //Tell the actor we started a GC
   }
   protected def regionOf(ptr : Long) = ContiguousRegion(ptr, sizeOf(ptr))
 
-  // This is blocking and should not be called in the main allocation thread
-  protected def gc {
-    @tailrec
-    def gcInternal(srch : MemorySearch, alreadySearched : SortedSet[Long],
-      free : UnallocatedSpace) : Unit = {
-      lock.synchronized {
-        if (runningGC.map { _ != srch }.getOrElse(false)) {
-          // Someone else is running other than us
-          None
-        }
-        else if((pinned diff lastPinnedSearch).size < minDiffOfPinnedSet) {
-          //Is the pinned set different enough?
-          None
-        }
-        else {
-          val toSearch = pinned -- alreadySearched
-          if (toSearch.isEmpty) {
-            //We are done, inside the lock update
-            println("old space: " + freeSpace.size)
-            freeSpace = free.toRegionSet
-            println("new space: " + freeSpace.size)
-            lastGCPtr = srch.thisMax
-            lastPinnedSearch = pinned
-            runningGC = None
-            None
-          }
-          else {
-            //Return the ones we haven't yet searched:
-            runningGC = Some(srch)
-            Some(toSearch)
-          }
-        }
-      }
-      .map { difference =>
-        //Which ones did we overlook
-        (alreadySearched ++ difference,
-          srch.breadthFirst( Queue(difference.toSeq.map { regionOf } : _*), free))
-      } match {
-        case Some((newSearched, newFree)) => gcInternal(srch, newSearched, newFree)
-        case None => ()
-      }
-    }
-    try {
-      // Note we should not be holding the lock during this operation:
-      val search = MemorySearch(lock.synchronized { maxPtr })
-      // Initially we haven't searched anything
-      gcInternal(search, SortedSet[Long](), search.empty)
-    }
-    catch {
-      // If we have any failure, reset the flag
-      case x : Throwable => {
-        lock.synchronized { runningGC = None }
-        throw x
-      }
-    }
-  }
-
-  case class MemorySearch(val thisMax : Long) extends
-    GraphSearch[ContiguousRegion, UnallocatedSpace] {
-    val empty = UnallocatedSpace.range(minPtr, thisMax)
-    def visit(node : ContiguousRegion, visited : UnallocatedSpace) = visited - node
-    def haveVisited(node : ContiguousRegion, visited : UnallocatedSpace) = {
-      // We remove the region when we visit
-      visited.contains(node)
-    }
-    def neighborsOf(node : ContiguousRegion) = {
-      deref(node.ptr)
-        .asInstanceOf[ImmutableDagNode[Long]]
-        .pointers
-        .map { ptr => regionOf(ptr) }
-    }
-  }
-
-  case object Run
   override def init = { super.init; gcActor.start }
   override def stop { super.stop; gcActor ! Stop }
 
   protected val gcActor = new Actor {
     def act() { loop { react {
-      case Run => gc
+      case running : GCState => {
+        // Now we are definitely running, and try to finish. This can't be combined with
+        // the above because then we would rerun the entire search for each retry
+        println("GC")
+        gcState.mutateIdem { gcs => running.finishGC(gcs) }
+        println("Freed: " + running.freedSize)
+      }
       case Stop => exit
     } } }
   }
 }
 
-class GCDiskAllocator(cachedItems : Int, spillSize : Int = 10000000, filename : String = null)
-  extends CachingByteAllocatorBase(cachedItems) with GCFileStorage {
+class GCDiskAllocator(spillSize : Int = 10000000, filename : String = null)
+  extends ByteAllocator with GCFileStorage {
 
-  override val gcIntervalBytes = 1L << 20 // 1 MiB
+  override val gcIntervalBytes = 1L << 18 // 256k
   // TODO check file.deleteOnExit() to make sure this gets cleaned up
   private val realFileName = Option(filename).getOrElse(java.util.UUID.randomUUID.toString)
   // initialize the file, start the write thread
@@ -360,6 +400,20 @@ class GCDiskAllocator(cachedItems : Int, spillSize : Int = 10000000, filename : 
     // When we alloc we pin, when we free, we unpin
     addToPinned(ptr)
     super.afterAlloc(ptr, obj)
+  }
+
+  override def deref[T](ptr : Long) = {
+    // This is pinned again:
+    try {
+      addToPinned(ptr)
+      super.deref[T](ptr)
+    }
+    catch {
+      case t : Throwable => {
+        free(ptr)
+        throw new Exception(t)
+      }
+    }
   }
 
   override def finalize { close }

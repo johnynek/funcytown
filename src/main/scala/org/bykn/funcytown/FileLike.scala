@@ -189,18 +189,23 @@ class FileLikeSeq(next : sciList[FileLike], passed : sciList[FileLike],
     }
 
   protected def doRight(amt : Long)(action : (FileLike) => (Long, FileLike)) : (Long,FileLike) = {
-    val movedNextFL = action(next.head)
-    val moved = movedNextFL._1
-    val (nn, np) = if (moved == amt) {
-      // next.head could accomodate
-      val newNext = movedNextFL._2 :: next.tail
-      (newNext, passed)
+    next.headOption.map { nextHead =>
+      val movedNextFL = action(nextHead)
+      val moved = movedNextFL._1
+      val (nn, np) = if (moved == amt) {
+        // next.head could accomodate
+        val newNext = movedNextFL._2 :: next.tail
+        (newNext, passed)
+      }
+      else {
+        //We exhausted the head:
+        (next.tail, movedNextFL._2 :: passed)
+      }
+      (moved, new FileLikeSeq(nn, np, position + moved))
     }
-    else {
-      //We exhausted the head:
-      (next.tail, movedNextFL._2 :: passed)
+    .getOrElse {
+      (0L, this)
     }
-    (moved, new FileLikeSeq(nn, np, position + moved))
   }
   override def moveRight(right : Long) = doRight(right) { _.moveRight(right) }
   override def read(into : Array[Byte], offset : Int, size : Int) = doRight(size) {
