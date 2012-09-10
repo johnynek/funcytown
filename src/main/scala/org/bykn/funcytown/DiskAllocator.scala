@@ -7,6 +7,8 @@ import com.esotericsoftware.kryo.{Serializer => KSerializer}
 
 import org.objenesis.strategy.StdInstantiatorStrategy;
 
+import org.bykn.funcytown.io._
+
 import scala.collection.mutable.{HashMap => MHash}
 import scala.collection.immutable.LinearSeq
 import scala.collection.immutable.{List => sciList}

@@ -2,6 +2,8 @@ package org.bykn.funcytown
 
 import java.io.RandomAccessFile
 
+import org.bykn.funcytown.io._
+
 import scala.collection.SeqView
 import scala.collection.immutable.{List => sciList}
 import scala.collection.immutable.{SortedMap, SortedSet, Queue}
