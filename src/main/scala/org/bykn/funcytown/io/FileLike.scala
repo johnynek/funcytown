@@ -1,5 +1,7 @@
 package org.bykn.funcytown.io
 
+import java.nio.ByteBuffer
+
 import scala.annotation.tailrec
 
 // Abstract memory and file storage in a poor-man's Monad, but not really a monad,
@@ -36,24 +38,16 @@ trait FileLike {
     (ba(0), fl)
   }
   def readInt : (Int, FileLike) = {
-    def posByte(b : Byte) : Int = {
-      val bi = b.toInt
-      if( b < 0) { bi + 256 }
-      else { bi }
-    }
-    // TODO: do only one call to readFully here
-    (0 to 3).foldLeft((0,this)) { (intFl, idx) =>
-      //Big-endian
-      val (b, fl) = intFl._2.readByte
-      ((intFl._1 << 8) | posByte(b), fl)
-    }
+    val bytes = new Array[Byte](4)
+    val f1 = readFully(bytes)
+    (ByteBuffer.wrap(bytes).getInt,
+      f1)
   }
   def writeByte(b : Byte) : FileLike = writeFully(Array(b))
   def writeInt(towrite : Int) : FileLike = {
-    // TODO: do only one call to writeFully here
-    (0 to 3).foldLeft(this) { (fl,idx) =>
-      fl.writeByte(((towrite >> ((3 - idx) * 8)) & 0xFF).toByte)
-    }
+    val bytes = new Array[Byte](4)
+    ByteBuffer.wrap(bytes).putInt(towrite)
+    writeFully(bytes)
   }
   def readFully(into : Array[Byte]) : FileLike = {
     @tailrec
