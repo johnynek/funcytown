@@ -9,7 +9,7 @@ class MapSpec extends Specification {
   noDetailedDiffs()
   // Cache the last N objects, so we have to hit disk sometimes
   //implicit val alloc = new CachingDiskAllocator(50)
-  implicit val alloc = new GCDiskAllocator(1 << 19) //512KB
+  implicit val alloc = new GCDiskAllocator(10 * (1 << 20)) //10MB
   //implicit val alloc = new DiskAllocator("test", 1 << 16) // 64k of ram
   //implicit val alloc = new MemoryAllocator
   val ITERS = 100000 // Should be much larger than 100
