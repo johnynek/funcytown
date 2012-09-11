@@ -1,5 +1,7 @@
 package org.bykn.funcytown
 
+import org.bykn.funcytown.gc._
+
 import org.specs._
 
 import scala.collection.immutable.{List => sciList}

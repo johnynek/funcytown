@@ -1,4 +1,4 @@
-package org.bykn.funcytown
+package org.bykn.funcytown.disk
 
 import com.esotericsoftware.kryo.io.{Input => KInput}
 import com.esotericsoftware.kryo.io.{Output => KOutput}
@@ -6,6 +6,9 @@ import com.esotericsoftware.kryo.Kryo
 import com.esotericsoftware.kryo.{Serializer => KSerializer}
 
 import scala.collection.immutable.{List => sciList}
+
+import org.bykn.funcytown.HashEntry
+import org.bykn.funcytown.ImmutableDagNode
 
 // Using the collection builder stuff, I bet you can do this correctly for anything with a builder
 class ScalasciListSerializer[T] extends KSerializer[sciList[T]] {

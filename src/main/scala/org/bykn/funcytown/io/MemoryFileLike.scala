@@ -4,7 +4,8 @@ object MemoryFileLike {
   def apply(size : Int) = new MemoryFileLike(0L, 0, new Array[Byte](size))
 }
 
-class MemoryFileLike(override val position : Long, max : Int, memory : => Array[Byte]) extends FileLike {
+// TODO make memory lazy, so we can avoid allocation until really needed
+class MemoryFileLike(override val position : Long, max : Int, memory : Array[Byte]) extends FileLike {
   protected def size = memory.size
   override def toHead = new MemoryFileLike(0L, max, memory)
   override def moveRight(right : Long) = {

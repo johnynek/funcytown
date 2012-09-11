@@ -1,7 +1,9 @@
 package org.bykn.funcytown
 
-import org.specs._
 import java.util.Random
+
+import org.bykn.funcytown.gc.GCDiskAllocator
+import org.specs._
 
 class MapSpec extends Specification {
   noDetailedDiffs()
