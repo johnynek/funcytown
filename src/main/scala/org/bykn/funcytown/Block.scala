@@ -4,8 +4,8 @@ import scala.annotation.tailrec
 
 object Block {
   @tailrec
-  final def shiftOf(mask : Int, cnt : Int = 0) : Int = {
-    if (mask == 0) cnt else shiftOf(mask >> 1, cnt + 1)
+  final def shiftOf(mask : Long, cnt : Int = 0) : Int = {
+    if (mask == 0L) cnt else shiftOf(mask >> 1, cnt + 1)
   }
   @tailrec
   final def bitmaskOf(cnt : Int, bm : Long = 0) : Long = {
