@@ -8,13 +8,6 @@ class ObjNode[T](val ptr : Long, val obj : T, override val mem : Allocator[Long]
   override def finalize { mem.free(ptr) }
 }
 
-class DiskLeaf(val ptr : Long, hs : Short, ps : Long, valuePtr : Long, override val mem : Allocator[Long]) extends
-  Leaf[Long](hs, ps, valuePtr, mem) with ImmutableDagNode[Long] {
-  override def selfPtr = ptr
-  override lazy val pointers = Set(valuePtr).filter { _ != mem.nullPtr }
-  override def finalize { mem.free(ptr) }
-}
-
 class DiskPtrNode(val ptr : Long, height : Short, ptrs : Block[Long],
   override val mem : Allocator[Long])
   extends PtrNode[Long](height, ptrs, mem) with ImmutableDagNode[Long] {

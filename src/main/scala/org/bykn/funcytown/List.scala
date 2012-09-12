@@ -158,7 +158,19 @@ class List[+T,PtrT](val h : PtrT, val t : PtrT, val alloc : Allocator[PtrT]) ext
   }
   override def isEmpty = (t == alloc.nullPtr)
   override lazy val head = alloc.derefObj[T](h)
-  override def iterator : Iterator[T] = toStream.iterator
+  // This lazy and doesn't force any permanent materialization
+  override def iterator : Iterator[T] = {
+    val outerlist = this
+    new Iterator[T] {
+      var list = outerlist
+      def hasNext = !list.isEmpty
+      def next = {
+        val res = alloc.derefObj[T](list.h)
+        list = alloc.deref[List[T,PtrT]](list.t)
+        res
+      }
+    }
+  }
   override lazy val reverse : List[T,PtrT] = {
     foldLeftPtr(alloc.nil[T]) { (tail, ptr) =>
       alloc.allocCons[T](ptr, alloc.ptrOf(tail))

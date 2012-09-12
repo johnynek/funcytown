@@ -18,9 +18,6 @@ class MemoryAllocator(implicit mf : Manifest[AnyRef]) extends Allocator[AnyRef] 
   def allocCons[T](head : AnyRef, tail : AnyRef) : List[T,AnyRef] = {
     new List(head, tail, this)
   }
-  override def allocLeaf(height : Short, pos : Long, valuePtr : AnyRef) = {
-    new Leaf(height, pos, valuePtr, this)
-  }
   override def allocPtrNode(height : Short, ptrs : Block[AnyRef]) = {
     new PtrNode[AnyRef](height, ptrs, this)
   }

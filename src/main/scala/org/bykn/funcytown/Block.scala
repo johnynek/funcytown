@@ -11,19 +11,26 @@ object Block {
   final def bitmaskOf(cnt : Int, bm : Long = 0) : Long = {
     if (cnt <= 0) bm else bitmaskOf(cnt - 1, (bm << 1) | 1)
   }
+
+  def fixHeight(height : Int, pos : Long) : Long = {
+    (pos & bitmaskOf(Block.SHIFT * (height + 1)))
+  }
+
   //val SHIFT = shiftOf(BITMASK)
-  val SHIFT = 5
+  val SHIFT = 5 // In simple tests, 5 seems close to optimal
   val BITMASK = bitmaskOf(SHIFT).toInt
   def alloc[T](implicit mf : Manifest[T]) : Block[T] = {
     new Block[T](BITMASK, mf.newArray(BITMASK + 1))
   }
 
+  /**
+   * break pos into SHIFT bit wide blocks,
+   * indexing from the right, take block with index=height.
+   */
   def toBlockIdx(height : Int, pos : Long) : (Int, Long) = {
-    val blocks = 64 / SHIFT
-    val nextBlocks = (blocks - height - 1)
-    val thisPos = ((pos >> (SHIFT * nextBlocks)) & BITMASK).toInt
-    val nextPos = pos & bitmaskOf(SHIFT * nextBlocks)
-    (thisPos, nextPos)
+    val shifted = pos >> (SHIFT * height)
+    val thisPos = (shifted & BITMASK).toInt
+    (thisPos, shifted >> SHIFT)
   }
 
   def fromSparse[N](sparse : Map[Int,N], sval : N)(implicit mf : Manifest[N]) : Block[N] = {
@@ -36,7 +43,7 @@ object Block {
   }
 }
 
-sealed class Block[@specialized(Int,Long) N](bitmask : Int, ary : Array[N]) {
+sealed class Block[@specialized(Int,Long) N](bitmask : Int, ary : Array[N]) extends Iterable[N] {
 
   private def toIdx(in : Long) = (in & bitmask).toInt
   def apply(idx : Long) : N = ary(toIdx(idx))
@@ -61,6 +68,6 @@ sealed class Block[@specialized(Int,Long) N](bitmask : Int, ary : Array[N]) {
       }
     }
   }
-  def foldLeft[M](init : M)(foldfn : (M,N) => M) : M = ary.foldLeft(init)(foldfn)
+  def iterator = ary.iterator
   override def toString = ary.toString
 }

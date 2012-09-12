@@ -2,6 +2,9 @@ package org.bykn.funcytown
 
 trait Allocator[@specialized(Long) PtrT] {
   val nullPtr : PtrT
+  def optionPtr(ptr : PtrT) = if(ptr != nullPtr) Some(ptr) else None
+  def derefOpt[T](ptr : PtrT) = optionPtr(ptr).map { notnullptr => deref[T](notnullptr) }
+
   def deref[T](ptr : PtrT) : T
   // This is the inverse of allocObj
   def derefObj[T](ptr : PtrT) : T
@@ -14,7 +17,6 @@ trait Allocator[@specialized(Long) PtrT] {
   // Store the object into the memory and return a pointer to it
   def allocObj[T](obj : T) : PtrT
   def allocCons[T](head : PtrT, tail : PtrT) : List[T,PtrT]
-  def allocLeaf(height : Short, pos : Long, value : PtrT) : Leaf[PtrT]
   def allocPtrNode(height : Short, ptrs : Block[PtrT]) : PtrNode[PtrT]
   // When will no longer use this node, free may be called and the allocator
   // may release the memory

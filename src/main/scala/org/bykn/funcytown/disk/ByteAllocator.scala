@@ -27,7 +27,6 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
       new HashEntrySerializer[AnyRef,AnyRef](_.hashCode.toLong))
     // Use our byte-storage to just serialize the pointers, and call deref on deserialize
     k.register(classOf[ObjNode[AnyRef]], new IdnSerializer[ObjNode[AnyRef]](this))
-    k.register(classOf[DiskLeaf], new IdnSerializer[DiskLeaf](this))
     k.register(classOf[DiskPtrNode], new IdnSerializer[DiskPtrNode](this))
     k.register(classOf[DiskSeq[AnyRef]], new IdnSerializer[DiskSeq[AnyRef]](this))
     // Use objensis for better support of scala objects:
@@ -38,7 +37,6 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   private val output = new KOutput(4096, 1 << 20)
   private val emptyPtrNodes = MHash[Short, DiskPtrNode]()
 
-  val LEAFNODE = 1 : Byte
   val PTRNODE = 2 : Byte
   val SEQNODE = 3 : Byte
   val OBJNODE = 4 : Byte
@@ -51,7 +49,6 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
     val (objType, buf) = readBytes(ptr)
     val obj = objType match {
       // This is ugly, but this method is not type safe anyway
-      case LEAFNODE => readLeaf(ptr, buf)
       case PTRNODE => readPtrNode(ptr, buf)
       case SEQNODE => readList[AnyRef](ptr, buf)
       case OBJNODE => readObj[AnyRef](ptr, buf)
@@ -61,15 +58,6 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
   }
 
   override def derefObj[T](ptr : Long) : T = deref[ObjNode[T]](ptr).obj
-
-  protected def readLeaf(ptr : Long, buf : Array[Byte]) : DiskLeaf = {
-    val input = new KInput(buf)
-    // These bool parameters mean optimize for positive sizes:
-    val height = input.readShort
-    val pos = input.readLong(true)
-    val valPtr = input.readLong(true)
-    new DiskLeaf(ptr, height, pos, valPtr, this)
-  }
 
   protected def readPtrNode(ptr : Long, buf : Array[Byte]) : DiskPtrNode = {
     val input = new KInput(buf)
@@ -121,7 +109,6 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
 
   override def ptrOf(node : Node[Long]) = {
     node match {
-      case leaf : DiskLeaf => leaf.ptr
       case ptrNode : DiskPtrNode => ptrNode.ptr
       case _ => error("Invalid node")
     }
@@ -155,18 +142,6 @@ abstract class ByteAllocator extends Allocator[Long] with ByteStorage {
     }
     val ptr = writeBytes(SEQNODE, toWrite)
     afterAlloc(ptr, new DiskSeq[T](ptr, h, tail, this))
-  }
-
-  override def allocLeaf(height : Short, pos : Long, value : Long) = {
-    val toWrite = output.synchronized {
-      output.clear
-      output.writeShort(height)
-      output.writeLong(pos, true)
-      output.writeLong(value, true)
-      output.toBytes
-    }
-    val ptr = writeBytes(LEAFNODE, toWrite)
-    afterAlloc(ptr, new DiskLeaf(ptr, height, pos, value, this))
   }
 
   override def allocPtrNode(height : Short, ptrs : Block[Long]) = {

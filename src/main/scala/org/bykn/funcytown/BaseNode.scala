@@ -7,133 +7,98 @@ import scala.collection.immutable.{List => sciList}
  * (and also in principle an persistent vector class)
  * At each position it holds a pointer to some object.
  */
-abstract class Node[PtrT] {
+trait Node[PtrT] extends Iterable[PtrT] {
   def allocator : Allocator[PtrT]
+  // returns allocator.nullPtr if pos is absent
+  def find(pos : Long) : PtrT
+  def map(pos : Long)(fn : PtrT => PtrT) : (PtrT, Node[PtrT])
+
+  // These are in terms of the above
   def apply(pos : Long) = get(pos).get
-  def get(pos : Long) : Option[PtrT] = findLeaf(pos).map { _.valuePtr }
-  def isEmpty : Boolean
-  def findLeaf(pos : Long) : Option[Leaf[PtrT]]
+  def get(pos : Long) : Option[PtrT] = allocator.optionPtr(find(pos))
   def put(pos : Long, value : PtrT) : Node[PtrT] = {
     // Just replace:
-    map(pos) { x => Some(value) }._2
+    map(pos) { x => value }._2
   }
-  def take(pos : Long) : (Option[PtrT], Node[PtrT]) = {
+  def take(pos : Long) : (PtrT, Node[PtrT]) = {
     // Just erase whatever is there:
-    map(pos) { old => None }
+    map(pos) { old => allocator.nullPtr }
   }
-  def map(pos : Long)(fn : Option[PtrT] => Option[PtrT]) : (Option[PtrT], Node[PtrT])
-  // These are all the leaf value pointers in this tree
-  def toStream : Stream[PtrT]
 }
 
 class PtrNode[PtrT](val height : Short, val ptrs : Block[PtrT],
   mem : Allocator[PtrT])(implicit mf : Manifest[PtrT]) extends Node[PtrT] {
   override def allocator = mem
-  override def isEmpty : Boolean = {
-    ptrs.foldLeft(true) { (empty, ptr) =>
-      empty && ((ptr == mem.nullPtr) || mem.deref[Node[PtrT]](ptr).isEmpty)
-    }
-  }
-  override def findLeaf(pos : Long) : Option[Leaf[PtrT]] = {
+  override def find(pos : Long) : PtrT = {
     val (thisIdx, nextPos) = Block.toBlockIdx(height, pos)
-    val nextPtr = ptrs(thisIdx)
-    if (mem.nullPtr != nextPtr) {
-      // nextPtr has height strictly greater
-      val nextNode = mem.deref[Node[PtrT]](nextPtr)
-      nextNode.findLeaf(nextPos)
+    mem.optionPtr(ptrs(thisIdx))
+      .map { ptr =>
+        if(height == 0) {
+          ptr
+        }
+        else {
+          mem.deref[Node[PtrT]](ptr).find(pos)
+        }
+      }
+      .getOrElse(mem.nullPtr)
+  }
+
+  private lazy val thisPtr = mem.ptrOf(this)
+
+  def replaceAt(idx : Int, ptr : PtrT) : PtrNode[PtrT] = {
+    val curPtr = ptrs(idx)
+    if (curPtr != ptr) {
+      mem.allocPtrNode(height, ptrs.updated(idx, ptr))
     }
     else {
-      None
+      this
     }
   }
 
-  override def map(pos : Long)(fn : Option[PtrT] => Option[PtrT]) : (Option[PtrT], Node[PtrT]) = {
+  override def map(pos : Long)(fn : PtrT => PtrT) : (PtrT, Node[PtrT]) = {
     val (thisIdx, nextPos) = Block.toBlockIdx(height, pos)
-    val nextPtr = ptrs(thisIdx)
-    val (oldVal, newPtr) = if (mem.nullPtr == nextPtr) {
-      val value = fn(None)
-      if (value.isDefined) {
-        // This is a new value:
-        (None, mem.ptrOf(mem.allocLeaf((height + 1).toShort, nextPos, value.get)))
+    if(nextPos == 0L) {
+      //We or our child handles it
+      val init = ptrs(thisIdx)
+      if(height == 0) {
+        // We handle it:
+        val newNode = replaceAt(thisIdx, fn(init))
+        (init, newNode)
       }
       else {
-        // Mapping None => None, weird, but okay.
-        (None, mem.nullPtr)
+        val childH = height - 1
+        val maskedPos = Block.fixHeight(childH, pos)
+        val (old, newChild) = mem.derefOpt[Node[PtrT]](init)
+          .orElse(Some(mem.empty(childH.toShort)))
+          .map { _.map(maskedPos)(fn) }.get
+        // Check to see if the newChild has some non-zero blocks
+        if (!newChild.isEmpty) {
+          (old, replaceAt(thisIdx, mem.ptrOf(newChild)))
+        }
+        else {
+          (old, replaceAt(thisIdx, mem.nullPtr))
+        }
       }
     }
     else {
-      // nextPtr has height strictly greater
-      val nextNode = mem.deref[Node[PtrT]](nextPtr)
-      // Replace down the tree:
-      val (old, resNode) = nextNode.map(nextPos)(fn)
-      // If it is empty, we don't need to store, it, just put null
-      (old, if (resNode.isEmpty) mem.nullPtr else mem.ptrOf(resNode))
+      //We have to insert a new level above us, and the item is not here:
+      val newHeight = (height + 1).toShort
+      val above = mem.allocPtrNode(newHeight, mem.empty(newHeight).ptrs.updated(0, thisPtr))
+      above.map(pos)(fn)
     }
-    (oldVal, mem.allocPtrNode(height, ptrs.updated(thisIdx, newPtr)))
   }
 
+  override def iterator : Iterator[PtrT] = {
+    val ptrlistit = ptrs.iterator.filter { _ != mem.nullPtr }
 
-  override def toStream : Stream[PtrT] = {
-    // Just get the children streams out in order:
-    ptrs.foldLeft(Stream.empty[PtrT]) { (oldStream, newPtr) =>
-      if (newPtr != mem.nullPtr) {
-        oldStream ++ (mem.deref[Node[PtrT]](newPtr).toStream)
-      }
-      else {
-        oldStream
-      }
+    if (height == 0) {
+      ptrlistit
+    }
+    else {
+      ptrlistit.flatMap { ptr => mem.deref[Node[PtrT]](ptr).iterator }
     }
   }
   override def toString = {
     sciList("PtrNode(", height, ptrs, ")").mkString(", ")
-  }
-}
-
-class Leaf[PtrT](val height : Short, val pos : Long, val valuePtr : PtrT, mem : Allocator[PtrT])
-  (implicit mf : Manifest[PtrT])
-  extends Node[PtrT] {
-  override def allocator = mem
-  override def isEmpty = false
-  override def findLeaf(inpos : Long) = {
-    if (pos == inpos) {
-      Some(this)
-    }
-    else {
-      None
-    }
-  }
-
-  override def map(inpos : Long)(fn : Option[PtrT] => Option[PtrT]) : (Option[PtrT], Node[PtrT]) = {
-    val oldValue = Some(valuePtr)
-    if (pos == inpos) {
-      val newValue = fn(oldValue)
-      if (newValue.isDefined) {
-        // Replace:
-        (oldValue, mem.allocLeaf(height, pos, newValue.get))
-      }
-      else {
-        // This node is now deleted:
-        (oldValue, mem.empty(height))
-      }
-    }
-    else {
-      //We have to deepen the tree here:
-      val newValue = fn(None)
-      if (newValue.isDefined) {
-        assert(height > 0)
-        val resNode = mem.empty(height)
-          .put(pos, valuePtr)
-          .put(inpos, newValue.get)
-        (None, resNode)
-      }
-      else {
-        // None => None case, so do nothing:
-        (None, this)
-      }
-    }
-  }
-  override def toStream = Stream(valuePtr)
-  override def toString = {
-    sciList("LeafNode(", height, pos, valuePtr, ")").mkString(", ")
   }
 }

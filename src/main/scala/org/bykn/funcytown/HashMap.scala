@@ -3,15 +3,18 @@ package org.bykn.funcytown
 import scala.collection.immutable.{List => sciList}
 import scala.annotation.tailrec
 
+import Block.{bitmaskOf, shiftOf}
+
 object HashMap {
+  val defaultBitmask = 31L // 32 initial size
   def apply[K,V](tups : Tuple2[K,V]*)(implicit mem : Allocator[_]) : HashMap[K,V,_] = {
     tups.foldLeft(empty[K,V](mem)) { (old, tupE) =>
       old + tupE
     }
   }
   def empty[K,V](implicit mem : Allocator[_]) : HashMap[K,V,_] = {
-    // Make the biggest bitmask we can fit in a 64 bit hash
-    new HashMap(0, Block.bitmaskOf((64 / Block.SHIFT) * Block.SHIFT - 1), mem.empty(0))
+    // start with
+    new HashMap(0, defaultBitmask, mem.empty(0))
   }
 }
 
@@ -29,16 +32,18 @@ class HashMap[K,+V, PtrT](val longSize : Long, bitmask : Long, node : Node[PtrT]
 
   protected def mem = node.allocator
 
-  def rehash[V1 >: V](newbitmask : Long, newMem : Allocator[PtrT]) : HashMap[K,V1,PtrT] = {
-    if ( newbitmask == bitmask ) {
-      this
+  def rehash[V1 >: V, PtrU](newbitmask : Long, newMem : Allocator[PtrU]) : HashMap[K,V1,PtrU] = {
+    if ( (newbitmask == bitmask) && (mem == newMem) ) {
+      // if newMem == mem, PtrT == PtrU
+      this.asInstanceOf[HashMap[K,V1,PtrU]]
     }
     else {
-      val base = new HashMap[K,V1,PtrT](0L, newbitmask, newMem.empty(0))
-      foldLeft(base) { (old, kv) => old + kv }
+      val base = new HashMap[K,V1,PtrU](0L, newbitmask, newMem.empty(0))
+      foldLeft(base) { (old, kv) => old.addRehash(kv, rehash=false) }
     }
   }
 
+  // TODO we need to use an actual 64-bit hash, like Murmur
   protected def longHash(k : K) = k.hashCode.toLong
 
   protected def idxOf(hash : Long) = hash & bitmask
@@ -46,11 +51,16 @@ class HashMap[K,+V, PtrT](val longSize : Long, bitmask : Long, node : Node[PtrT]
   protected def sameKey(tup1 : HashEntry[K,_], tup2 : HashEntry[K,_]) = tup1.sameKeyAs(tup2)
 
   override def +[V1 >: V](kv : (K,V1)) : HashMap[K,V1,PtrT] = {
+    addRehash(kv, rehash=true)
+  }
+
+  // Add an item and optionally rehash
+  def addRehash[V1 >: V](kv : (K,V1), rehash : Boolean) : HashMap[K,V1,PtrT] = {
     val hash = longHash(kv._1)
     val entryTup = new HashEntry(hash, kv._1, kv._2)
     var sizeDelta = 0L
-    val oldValNewNode = node.map(idxOf(entryTup.hash)) { listPtrOpt =>
-      val list = listPtrOpt
+    val oldValNewNode = node.map(idxOf(entryTup.hash)) { listPtr =>
+      val list = mem.optionPtr(listPtr)
         .map { ptr => mem.deref[List[HashEntry[K,V1], PtrT]](ptr) }
         .getOrElse(mem.nil[HashEntry[K,V1]])
       val newList = if (list.isEmpty || list.forall( !_.sameKeyAs(entryTup) )) {
@@ -77,19 +87,29 @@ class HashMap[K,+V, PtrT](val longSize : Long, bitmask : Long, node : Node[PtrT]
           val (head, tail) = findKey(entryTup, list)
           entryTup :: (head ++ tail)
         }
-      Some(mem.ptrOf(newList))
+      mem.ptrOf(newList)
     }
     val newNode = oldValNewNode._2
-    // TODO verify we don't need to rehash due to the sparsity of the Node data structure
-    new HashMap[K,V1,PtrT](longSize + sizeDelta, bitmask, newNode)
+    val newMap = new HashMap[K,V1,PtrT](longSize + sizeDelta, bitmask, newNode)
+    if(rehash) {
+      newMap.rehash(newMap.nextBitMask, node.allocator)
+    }
+    else {
+      newMap
+    }
+  }
+
+  protected def nextBitMask : Long = {
+    // At least a factor of 4 overhead:
+    bitmaskOf(shiftOf(longSize) + 2) max HashMap.defaultBitmask
   }
 
   override def -(key : K) : HashMap[K,V,PtrT] = {
     val hash = longHash(key)
     val entryTup = new HashEntry(hash, key, null)
     var sizeDelta = 0L
-    val oldValNewNode = node.map(idxOf(entryTup.hash)) { listPtrOpt =>
-      val list = listPtrOpt
+    val oldValNewNode = node.map(idxOf(entryTup.hash)) { listPtr =>
+      val list = mem.optionPtr(listPtr)
         .map { ptr => mem.deref[List[HashEntry[K,V], PtrT]](ptr) }
         .getOrElse(mem.nil[HashEntry[K,V]])
       val newList = if (list.isEmpty || list.forall( !_.sameKeyAs(entryTup) )) {
@@ -117,11 +137,11 @@ class HashMap[K,+V, PtrT](val longSize : Long, bitmask : Long, node : Node[PtrT]
           sizeDelta = -1L
           head ++ tail
         }
-      Some(mem.ptrOf(newList))
+      mem.ptrOf(newList)
     }
     val newNode = oldValNewNode._2
-    // TODO verify we don't need to rehash due to the sparsity of the Node data structure
-    new HashMap[K,V,PtrT](longSize + sizeDelta, bitmask, newNode)
+    val newMap = new HashMap[K,V,PtrT](longSize + sizeDelta, bitmask, newNode)
+    newMap.rehash(newMap.nextBitMask, node.allocator)
   }
 
   override def get(key : K) : Option[V] = {
@@ -136,12 +156,11 @@ class HashMap[K,+V, PtrT](val longSize : Long, bitmask : Long, node : Node[PtrT]
   }
 
   override def iterator : Iterator[(K,V)] = {
-    node.toStream
+    node.iterator
       .flatMap { listPtr =>
         val list = mem.deref[List[HashEntry[K,V], PtrT]](listPtr)
-        list.map { _.keyValue }
+        list.iterator.map { _.keyValue }
       }
-      .iterator
   }
 
   override lazy val size : Int = {
